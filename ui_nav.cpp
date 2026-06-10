@@ -3,6 +3,7 @@
 #include "app_locale.h"
 #include "ui_home.h"
 #include "ui_settings.h"
+#include "ui_vision.h"
 #include "ui_weather.h"
 
 #include <Arduino.h>
@@ -29,10 +30,16 @@ bool ui_nav_is_settings(void) {
   return !s_onHome && ui_settings_is_active();
 }
 
+bool ui_nav_is_vision(void) {
+  return !s_onHome && ui_vision_is_active();
+}
+
 static void open_focused_tile(void) {
   const int focus = ui_home_get_focus();
   if (focus == 0) {
     ui_weather_show();
+  } else if (focus == 1) {
+    ui_vision_show();
   } else if (focus == 3) {
     ui_settings_show();
   } else {
@@ -111,6 +118,33 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
           }
           return true;
         }
+        ui_home_show();
+        s_onHome = true;
+        if (outRefreshMode != nullptr) {
+          *outRefreshMode = UI_REFRESH_NAV;
+        }
+        return true;
+      case BTN_ACTION_VOICE_TOGGLE:
+        s_voiceListening = !s_voiceListening;
+        Serial.printf("[Voice] listening=%s (stub)\n", s_voiceListening ? "on" : "off");
+        return false;
+      default:
+        return false;
+    }
+  }
+
+  if (ui_vision_is_active()) {
+    switch (action) {
+      case BTN_ACTION_NEXT:
+        if (ui_vision_request_capture()) {
+          ui_vision_set_busy();
+          if (outRefreshMode != nullptr) {
+            *outRefreshMode = UI_REFRESH_NAV;
+          }
+          return true;
+        }
+        return false;
+      case BTN_ACTION_BACK:
         ui_home_show();
         s_onHome = true;
         if (outRefreshMode != nullptr) {

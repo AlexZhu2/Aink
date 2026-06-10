@@ -9,5 +9,6 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode);
 bool ui_nav_is_home(void);
 bool ui_nav_is_weather(void);
 bool ui_nav_is_settings(void);
+bool ui_nav_is_vision(void);
 
 #endif

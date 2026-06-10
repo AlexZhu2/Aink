@@ -7,14 +7,28 @@
 
 #include <Arduino.h>
 #include <stdio.h>
+#include <string.h>
 
-#define PREFS_NAMESPACE       "epaper"
-#define PREFS_KEY_SSID        "ssid"
-#define PREFS_KEY_PASS        "pass"
+#define PREFS_NAMESPACE        "epaper"
+#define PREFS_KEY_SSID         "ssid"
+#define PREFS_KEY_PASS         "pass"
 #define PREFS_KEY_FORCE_PORTAL "force_portal"
-#define PREFS_KEY_MODEL        "model"
 #define PREFS_KEY_LANGUAGE     "lang"
-#define PREFS_DEFAULT_MODEL    "Default"
+#define PREFS_KEY_AI_PROVIDER  "ai_provider"
+#define PREFS_KEY_AI_MODEL_IDX "ai_model"
+#define PREFS_KEY_AI_API_KEY   "ai_api_key"
+#define PREFS_API_KEY_MAX      128
+
+static void clamp_model_index_for_provider(AiProvider provider, int *modelIndex) {
+  const int count = ai_provider_model_count(provider);
+  if (count <= 0) {
+    *modelIndex = 0;
+    return;
+  }
+  if (*modelIndex < 0 || *modelIndex >= count) {
+    *modelIndex = 0;
+  }
+}
 
 void settings_api_get_wifi_ssid(char *out, size_t outLen) {
   if (out == nullptr || outLen == 0) {
@@ -50,16 +64,101 @@ bool settings_api_is_wifi_connected(void) {
   return WiFi.status() == WL_CONNECTED;
 }
 
-void settings_api_get_model_name(char *out, size_t outLen) {
+AiProvider settings_api_get_provider(void) {
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, true);
+  const uint8_t stored = prefs.getUChar(PREFS_KEY_AI_PROVIDER, (uint8_t)AI_PROVIDER_OPENAI);
+  prefs.end();
+  if (stored >= (uint8_t)AI_PROVIDER_COUNT) {
+    return AI_PROVIDER_OPENAI;
+  }
+  return (AiProvider)stored;
+}
+
+void settings_api_set_provider(AiProvider provider) {
+  if ((unsigned)provider >= AI_PROVIDER_COUNT) {
+    return;
+  }
+
+  int modelIndex = settings_api_get_model_index();
+  clamp_model_index_for_provider(provider, &modelIndex);
+
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, false);
+  prefs.putUChar(PREFS_KEY_AI_PROVIDER, (uint8_t)provider);
+  prefs.putUChar(PREFS_KEY_AI_MODEL_IDX, (uint8_t)modelIndex);
+  prefs.end();
+}
+
+int settings_api_get_model_index(void) {
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, true);
+  int modelIndex = (int)prefs.getUChar(PREFS_KEY_AI_MODEL_IDX, 0);
+  prefs.end();
+  clamp_model_index_for_provider(settings_api_get_provider(), &modelIndex);
+  return modelIndex;
+}
+
+void settings_api_set_model_index(int modelIndex) {
+  AiProvider provider = settings_api_get_provider();
+  clamp_model_index_for_provider(provider, &modelIndex);
+
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, false);
+  prefs.putUChar(PREFS_KEY_AI_MODEL_IDX, (uint8_t)modelIndex);
+  prefs.end();
+}
+
+const char *settings_api_get_model_id(void) {
+  const AiProvider provider = settings_api_get_provider();
+  const int modelIndex = settings_api_get_model_index();
+  return ai_provider_model_id(provider, modelIndex);
+}
+
+const char *settings_api_get_model_label(void) {
+  const AiProvider provider = settings_api_get_provider();
+  const int modelIndex = settings_api_get_model_index();
+  return ai_provider_model_label(provider, modelIndex);
+}
+
+bool settings_api_has_api_key(void) {
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, true);
+  const String key = prefs.getString(PREFS_KEY_AI_API_KEY, "");
+  prefs.end();
+  return key.length() > 0;
+}
+
+void settings_api_set_api_key(const char *apiKey) {
+  if (apiKey == nullptr) {
+    return;
+  }
+
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, false);
+  prefs.putString(PREFS_KEY_AI_API_KEY, apiKey);
+  prefs.end();
+  Serial.println("[Settings] AI API key saved");
+}
+
+void settings_api_clear_api_key(void) {
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, false);
+  prefs.remove(PREFS_KEY_AI_API_KEY);
+  prefs.end();
+  Serial.println("[Settings] AI API key cleared");
+}
+
+void settings_api_get_api_key(char *out, size_t outLen) {
   if (out == nullptr || outLen == 0) {
     return;
   }
 
   Preferences prefs;
   prefs.begin(PREFS_NAMESPACE, true);
-  const String model = prefs.getString(PREFS_KEY_MODEL, PREFS_DEFAULT_MODEL);
+  const String key = prefs.getString(PREFS_KEY_AI_API_KEY, "");
   prefs.end();
-  snprintf(out, outLen, "%s", model.c_str());
+  snprintf(out, outLen, "%s", key.c_str());
 }
 
 AppLanguage settings_api_get_language(void) {

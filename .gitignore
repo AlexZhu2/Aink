@@ -17,6 +17,10 @@ build/
 Thumbs.db
 desktop.ini
 
+# Local test assets
+test.jpg
+*.jpg
+
 # Local font sources (generated aink_*.c is committed)
 tools/fonts/
 *.ttf

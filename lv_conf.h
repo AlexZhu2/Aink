@@ -25,12 +25,12 @@
 
 struct _lv_font_t;
 typedef struct _lv_font_t lv_font_t;
-extern const lv_font_t aink_12;
-extern const lv_font_t aink_14;
+extern const lv_font_t aink_3500_12;
+extern const lv_font_t aink_3500_14;
 
 #define LV_FONT_MONTSERRAT_12  0
 #define LV_FONT_MONTSERRAT_14  0
-#define LV_FONT_DEFAULT          &aink_14
+#define LV_FONT_DEFAULT          &aink_3500_14
 
 #define LV_USE_BTN         1
 #define LV_USE_LABEL       1

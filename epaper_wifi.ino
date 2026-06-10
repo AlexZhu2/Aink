@@ -13,9 +13,11 @@
 #include "ui_weather.h"
 #include "ui_settings.h"
 #include "ui_nav.h"
+#include "ui_vision.h"
 #include "ui_refresh.h"
 #include "settings_api.h"
 #include "app_locale.h"
+#include "camera_service.h"
 
 extern "C" {
 #include "qrcode.h"
@@ -273,10 +275,10 @@ static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>E-Paper WiFi</title>
+  <title>Aink Setup</title>
   <style>
     body { font-family: sans-serif; margin: 24px; background: #f5f5f5; }
-    .card { background: #fff; border-radius: 12px; padding: 20px; max-width: 420px; margin: 0 auto; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+    .card { background: #fff; border-radius: 12px; padding: 20px; max-width: 420px; margin: 0 auto 16px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
     h2 { margin-top: 0; }
     label { display: block; margin: 12px 0 6px; font-size: 14px; color: #444; }
     input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; }
@@ -286,15 +288,25 @@ static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
 </head>
 <body>
   <div class="card">
-    <h2>WiFi 设置</h2>
+    <h2>WiFi</h2>
     <form action="/save" method="POST">
       <label for="ssid">WiFi 名称</label>
       <input id="ssid" name="ssid" maxlength="32" required autocomplete="off">
       <label for="pass">WiFi 密码</label>
       <input id="pass" name="pass" type="password" maxlength="64" autocomplete="off">
-      <button type="submit">连接</button>
+      <button type="submit">连接 WiFi</button>
     </form>
-    <p class="hint">保存后设备会自动连接路由器并重启。若失败请返回此页重试。</p>
+    <p class="hint">保存后设备会尝试连接路由器并重启。</p>
+  </div>
+  <div class="card">
+    <h2>AI API</h2>
+    <form action="/save_ai" method="POST">
+      <label for="api_key">API Key</label>
+      <input id="api_key" name="api_key" type="password" maxlength="128" required autocomplete="off"
+             placeholder="Provider API Key">
+      <button type="submit">保存 API Key</button>
+    </form>
+    <p class="hint">Provider 与 Model 在设备 Settings → Model 中选择。Kimi Platform 请使用 platform.kimi.ai 的 Key；MiMo Token Plan 请使用 tp- 开头的订阅 Key。Key 仅存于本机 NVS，不会上传到其他服务器。</p>
   </div>
 </body>
 </html>
@@ -359,6 +371,44 @@ static void handlePortalSave() {
                     "<a href='/'>返回重试</a></body></html>");
 }
 
+static void handlePortalSaveAi() {
+  if (!portalServer.hasArg("api_key")) {
+    portalServer.send(400, "text/html; charset=utf-8",
+                      "<meta charset=utf-8><p>API Key 不能为空</p><a href='/'>返回</a>");
+    return;
+  }
+
+  String apiKey = portalServer.arg("api_key");
+  apiKey.trim();
+  if (apiKey.length() == 0) {
+    portalServer.send(400, "text/html; charset=utf-8",
+                      "<meta charset=utf-8><p>API Key 不能为空</p><a href='/'>返回</a>");
+    return;
+  }
+
+  settings_api_set_api_key(apiKey.c_str());
+
+  String storedSsid;
+  String storedPass;
+  if (loadStoredWiFiCredentials(storedSsid, storedPass)) {
+    portalServer.send(200, "text/html; charset=utf-8",
+                      "<!DOCTYPE html><html><head><meta charset=utf-8>"
+                      "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                      "</head><body><h2>API Key 已保存</h2>"
+                      "<p>设备即将重启并返回主界面...</p></body></html>");
+    delay(1500);
+    ESP.restart();
+    return;
+  }
+
+  portalServer.send(200, "text/html; charset=utf-8",
+                    "<!DOCTYPE html><html><head><meta charset=utf-8>"
+                    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                    "</head><body><h2>API Key 已保存</h2>"
+                    "<p>请先配置 WiFi，保存后设备会自动重启。</p>"
+                    "<a href='/'>返回</a></body></html>");
+}
+
 static void setupPortalWebRoutes() {
   if (portalWebStarted) {
     return;
@@ -366,6 +416,7 @@ static void setupPortalWebRoutes() {
 
   portalServer.on("/", HTTP_GET, handlePortalRoot);
   portalServer.on("/save", HTTP_POST, handlePortalSave);
+  portalServer.on("/save_ai", HTTP_POST, handlePortalSaveAi);
   portalServer.on("/generate_204", HTTP_GET, handlePortalRoot);
   portalServer.on("/hotspot-detect.html", HTTP_GET, handlePortalRoot);
   portalServer.on("/fwlink", HTTP_GET, handlePortalRoot);
@@ -397,6 +448,12 @@ static void startNormalOperation() {
     syncNetworkTime();
   }
 
+  if (camera_service_init()) {
+    Serial.println("[Camera] initialized");
+  } else {
+    Serial.println("[Camera] unavailable (no module or init error)");
+  }
+
   Serial.println("[EPD] full clear (~25s)...");
   EPD_1IN54_V2_Init();
   EPD_1IN54_V2_Clear();
@@ -413,6 +470,7 @@ static void startNormalOperation() {
   app_locale_init();
   ui_home_init();
   ui_weather_init();
+  ui_vision_init();
   ui_settings_init();
   ui_nav_init();
   ui_lvgl_prepare();
@@ -716,6 +774,15 @@ void loop() {
     UiRefreshMode navMode = UI_REFRESH_NONE;
     if (ui_nav_handle(btnAction, &navMode)) {
       refreshMainUiOnDisplay(navMode);
+      if (ui_vision_consume_capture_request()) {
+        Serial.println("[Vision] capture pipeline running (blocks up to ~60s)");
+        Serial.flush();
+        ui_vision_run_capture();
+        Serial.println("[Vision] capture pipeline done");
+        Serial.flush();
+        /* DisplayPart 与「分析中」时一致；QUALITY 的 BaseImage 在此状态下可能不更新可见区域 */
+        refreshMainUiOnDisplay(UI_REFRESH_NAV);
+      }
     }
   }
 

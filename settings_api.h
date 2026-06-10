@@ -4,12 +4,24 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "ai_model_config.h"
 #include "app_locale.h"
 
 void settings_api_get_wifi_ssid(char *out, size_t outLen);
 void settings_api_get_ip(char *out, size_t outLen);
 bool settings_api_is_wifi_connected(void);
-void settings_api_get_model_name(char *out, size_t outLen);
+
+AiProvider settings_api_get_provider(void);
+void settings_api_set_provider(AiProvider provider);
+int settings_api_get_model_index(void);
+void settings_api_set_model_index(int modelIndex);
+const char *settings_api_get_model_id(void);
+const char *settings_api_get_model_label(void);
+
+bool settings_api_has_api_key(void);
+void settings_api_set_api_key(const char *apiKey);
+void settings_api_clear_api_key(void);
+void settings_api_get_api_key(char *out, size_t outLen);
 
 AppLanguage settings_api_get_language(void);
 void settings_api_set_language(AppLanguage lang);

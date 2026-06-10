@@ -28,3 +28,13 @@ Regenerate weather icons from SVG:
 ```bash
 python epaper_wifi/tools/svg_to_weather_icons.py
 ```
+
+## Arduino board settings (XIAO ESP32S3 Sense + camera)
+
+- Board: **Seeed XIAO ESP32S3 Sense** (must include camera module)
+- **PSRAM: OPI PSRAM enabled** (required for camera + LVGL)
+- Partition: **Huge APP (3MB+)** or custom APP ≥ 3MB
+- esp-arduino **3.0.x** recommended for camera driver
+
+Boot log should show `[Camera] ready (240x240 JPEG)`. If you see
+`frame buffer malloc failed`, enable PSRAM or use a Sense board with camera.

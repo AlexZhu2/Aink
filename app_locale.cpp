@@ -4,12 +4,13 @@
 #include "ui_home.h"
 #include "ui_settings.h"
 #include "ui_weather.h"
+#include "ui_vision.h"
 
 static AppLanguage s_lang = APP_LANG_EN;
 
 static const char *kStringsEn[TR_COUNT] = {
     "Weather",
-    "App 2",
+    "AI Vision",
     "App 3",
     "Settings",
     "Online",
@@ -17,6 +18,15 @@ static const char *kStringsEn[TR_COUNT] = {
     "Detail",
     "Coming soon",
     "App",
+
+    "AI Vision",
+    "Press A to capture",
+    "Analyzing...",
+    "Camera unavailable",
+    "Set API in Settings",
+    "Check WiFi",
+    "Request failed",
+    "Provider unsupported",
 
     "Settings",
     "WiFi",
@@ -26,9 +36,12 @@ static const char *kStringsEn[TR_COUNT] = {
     "Network",
     "Reconfigure WiFi",
     "Forget WiFi",
-    "Current",
-    "Default",
-    "Voice: coming soon",
+    "Provider",
+    "Model",
+    "API: OK",
+    "API: --",
+    "Configure API",
+    "Clear API Key",
     "Panel: 200x200",
     "Refresh: auto",
     "Version 0.1",
@@ -60,7 +73,7 @@ static const char *kStringsEn[TR_COUNT] = {
 
 static const char *kStringsZh[TR_COUNT] = {
     "天气",
-    "应用2",
+    "AI识图",
     "应用3",
     "设置",
     "在线",
@@ -68,6 +81,15 @@ static const char *kStringsZh[TR_COUNT] = {
     "详情",
     "敬请期待",
     "应用",
+
+    "AI识图",
+    "短按A拍照",
+    "分析中...",
+    "相机不可用",
+    "请配置API",
+    "请检查网络",
+    "请求失败",
+    "提供商不支持",
 
     "设置",
     "无线",
@@ -77,9 +99,12 @@ static const char *kStringsZh[TR_COUNT] = {
     "网络",
     "重新配网",
     "忘记网络",
-    "当前",
-    "默认",
-    "语音: 敬请期待",
+    "提供商",
+    "模型",
+    "API: 已配置",
+    "API: 未配置",
+    "配置 API",
+    "清除 API",
     "屏幕: 200x200",
     "刷新: 自动",
     "版本 0.1",
@@ -151,4 +176,5 @@ void app_locale_refresh_all(void) {
   ui_home_refresh_locale();
   ui_settings_refresh();
   ui_weather_refresh();
+  ui_vision_refresh();
 }

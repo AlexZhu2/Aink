@@ -55,7 +55,7 @@ void ui_lvgl_init(void) {
   s_dispDrv.ver_res = UI_MAIN_HEIGHT;
   s_dispDrv.flush_cb = lvgl_flush_cb;
   s_dispDrv.draw_buf = &s_drawBuf;
-  s_dispDrv.full_refresh = 0;
+  s_dispDrv.full_refresh = 1;
   s_display = lv_disp_drv_register(&s_dispDrv);
   s_lastTickMs = millis();
   Serial.printf("[LVGL] init depth=%d disp=%p buf=%u px\n",
