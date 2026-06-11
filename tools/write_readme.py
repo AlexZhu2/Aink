@@ -48,7 +48,7 @@ See `DEV_Config.h` for EPD wiring (DIN D10, CLK D8, CS D9, DC D3, RST D1, BUSY D
 1. Install [Arduino IDE 2.x](https://www.arduino.cc/en/software) or arduino-cli
 2. Board package: **esp32 by Espressif** (3.x), board **XIAO ESP32S3**
 3. Library: **lvgl 8.3.x** (not 9.x)
-4. Open `epaper_wifi.ino` (this folder is the sketch root)
+4. Open `Aink.ino` (this folder is the sketch root)
 5. Upload; serial monitor **115200**
 
 First boot without saved WiFi enters AP portal mode automatically.
@@ -82,7 +82,7 @@ python tools/svg_to_weather_icons.py
 ## Project layout
 
 ```
-epaper_wifi.ino       Boot, WiFi portal, status bar, refresh orchestration
+Aink.ino              Boot, WiFi portal, status bar, refresh orchestration
 epaper_canvas.*       Framebuffer, rotation, EPD upload
 ui_home / ui_nav      Launcher and navigation
 ui_weather.*          Weather app

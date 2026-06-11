@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Local smoke test for epaper_wifi vision_service HTTP requests.
+Local smoke test for Aink vision_service HTTP requests.
 
 Mirrors the ESP32 payload (OpenAI-compatible chat/completions + base64 JPEG).
 Run this on PC first; when it succeeds, flash the firmware and test on device.

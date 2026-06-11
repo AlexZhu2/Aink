@@ -3,7 +3,7 @@
 Install the **lvgl** library in Arduino IDE / arduino-cli:
 
 - Library Manager: search **lvgl**, install **8.3.x** (recommended for this project).
-- Keep `lv_conf.h` in the `epaper_wifi` sketch folder (already included).
+- Keep `lv_conf.h` in the `Aink` sketch folder (already included).
 - `ui_lvgl.cpp` defines `LV_CONF_INCLUDE_SIMPLE` so this lv_conf.h is used.
 
 If compile errors mention `lv_disp_drv_t`, you likely have LVGL 9.x — install LVGL **8.3.11**.
@@ -26,7 +26,7 @@ Set BTN_SERIAL_SIM to 0 after wiring D6/D7.
 Regenerate weather icons from SVG:
 
 ```bash
-python epaper_wifi/tools/svg_to_weather_icons.py
+python Aink/tools/svg_to_weather_icons.py
 ```
 
 ## Arduino board settings (XIAO ESP32S3 Sense + camera)

@@ -84,7 +84,7 @@ Configure API key via captive portal or Settings. MiMo keys often start with `tp
 2. Board package: **esp32 by Espressif** (3.x), board **XIAO ESP32S3 Sense**
 3. Enable **OPI PSRAM** and **Huge APP** partition
 4. Library: **lvgl 8.3.x** (not 9.x)
-5. Open `epaper_wifi.ino` (this folder is the sketch root)
+5. Open `Aink.ino` (this folder is the sketch root)
 6. Upload; serial monitor **115200**
 
 First boot without saved WiFi enters AP portal mode automatically.
@@ -107,7 +107,7 @@ With `BTN_SERIAL_SIM=1` in `btn_input.h`:
 Same HTTP payload as the device; useful to validate API key and model:
 
 ```powershell
-cd epaper_wifi
+cd Aink
 $env:MIMO_API_KEY = "your-key"
 python tools/test_vision_api.py --provider mimo --image path\to\photo.jpg
 ```
@@ -139,7 +139,7 @@ python tools/svg_to_weather_icons.py
 ## Project layout
 
 ```
-epaper_wifi.ino       Boot, WiFi portal, status bar, refresh orchestration
+Aink.ino              Boot, WiFi portal, status bar, refresh orchestration
 epaper_canvas.*       Framebuffer, rotation, EPD upload
 ui_home / ui_nav      Launcher and navigation
 ui_weather.*          Weather app
