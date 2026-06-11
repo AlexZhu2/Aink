@@ -2,6 +2,7 @@
 
 #include "app_locale.h"
 #include "settings_api.h"
+#include "weather_gzip.h"
 
 #include <HTTPClient.h>
 #include <WiFi.h>
@@ -26,8 +27,12 @@ static int roundTemp(float tempC) {
   return (int)(tempC + (tempC >= 0.0f ? 0.5f : -0.5f));
 }
 
-static bool httpsGetBody(const char *url, const char *tag, String *outBody);
-static bool qweatherGet(const char *host, const char *pathQuery, const char *tag, String *outBody);
+static bool httpsGetBody(const char *url, const char *tag, const char *apiKey, String *outBody);
+static bool qweatherGet(const char *host, const char *pathQuery, const char *apiKey, const char *tag,
+                        String *outBody);
+static const char *qweatherLangCode(void);
+static bool parseQWeatherApiCode(const String &body, char *out, size_t outLen);
+static void logQWeatherFailure(const char *tag, const String &body);
 static int wdayFromIsoDate(const char *isoDate);
 static void dayLabelFromIsoDate(const char *isoDate, int index, char *out, size_t outLen);
 
@@ -249,7 +254,7 @@ static bool parseJsonFloatAfterKey(const String &body, int sectionIdx, const cha
   return true;
 }
 
-static bool httpsGetBody(const char *url, const char *tag, String *outBody) {
+static bool httpsGetBody(const char *url, const char *tag, const char *apiKey, String *outBody) {
   if (url == nullptr || tag == nullptr || outBody == nullptr) {
     return false;
   }
@@ -290,34 +295,115 @@ static bool httpsGetBody(const char *url, const char *tag, String *outBody) {
     return false;
   }
 
-  http.addHeader("Accept-Encoding", "identity");
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.addHeader("Accept", "application/json");
+  http.setAcceptEncoding("gzip");
+  if (apiKey != nullptr && apiKey[0] != '\0') {
+    http.addHeader("X-QW-Api-Key", apiKey);
+  }
 
   const int code = http.GET();
+  *outBody = http.getString();
+  http.end();
+
   if (code != HTTP_CODE_OK) {
     Serial.printf("[Weather] %s HTTP %d (%s)\r\n", tag, code, http.errorToString(code).c_str());
-    http.end();
+    logQWeatherFailure(tag, *outBody);
     return false;
   }
 
-  *outBody = http.getString();
-  http.end();
+  if (!weather_gzip_decompress(outBody)) {
+    Serial.printf("[Weather] %s gzip decompress failed\r\n", tag);
+    logQWeatherFailure(tag, *outBody);
+    return false;
+  }
   return true;
 }
 
-static bool qweatherGet(const char *host, const char *pathQuery, const char *tag, String *outBody) {
+static bool qweatherGet(const char *host, const char *pathQuery, const char *apiKey, const char *tag,
+                        String *outBody) {
   if (host == nullptr || host[0] == '\0' || pathQuery == nullptr || outBody == nullptr) {
     return false;
   }
 
   char url[384];
   snprintf(url, sizeof(url), "https://%s%s", host, pathQuery);
-  return httpsGetBody(url, tag, outBody);
+  return httpsGetBody(url, tag, apiKey, outBody);
+}
+
+static const char *qweatherLangCode(void) {
+  return app_locale_get() == APP_LANG_ZH ? "zh-hans" : "en";
+}
+
+static bool parseQWeatherApiCode(const String &body, char *out, size_t outLen) {
+  if (out == nullptr || outLen == 0) {
+    return false;
+  }
+  out[0] = '\0';
+
+  if (parseJsonQuotedString(body, "code", out, outLen)) {
+    return true;
+  }
+
+  const int codeIdx = body.indexOf("\"code\"");
+  if (codeIdx < 0) {
+    return false;
+  }
+
+  int pos = body.indexOf(':', codeIdx + 6);
+  if (pos < 0) {
+    return false;
+  }
+  pos++;
+  while (pos < (int)body.length() && (body.charAt(pos) == ' ' || body.charAt(pos) == '\t')) {
+    pos++;
+  }
+
+  size_t w = 0;
+  while (pos < (int)body.length() && w + 1 < outLen) {
+    const char c = body.charAt(pos);
+    if (c < '0' || c > '9') {
+      break;
+    }
+    out[w++] = c;
+    pos++;
+  }
+  out[w] = '\0';
+  return w > 0;
+}
+
+static void logQWeatherFailure(const char *tag, const String &body) {
+  char apiCode[16] = {};
+  if (parseQWeatherApiCode(body, apiCode, sizeof(apiCode))) {
+    Serial.printf("[Weather] %s QWeather code=%s\r\n", tag, apiCode);
+    return;
+  }
+
+  const int errIdx = body.indexOf("\"error\"");
+  if (errIdx >= 0) {
+    float status = 0.0f;
+    parseJsonFloatAfterKey(body, errIdx, "status", &status);
+    char detail[80] = {};
+    parseJsonQuotedStringAfter(body, errIdx, "detail", detail, sizeof(detail));
+    Serial.printf("[Weather] %s QWeather v2 status=%.0f detail=%s\r\n", tag, status,
+                  detail[0] != '\0' ? detail : "?");
+  }
+
+  Serial.print("[Weather] body: ");
+  const unsigned n = body.length() < 180 ? (unsigned)body.length() : 180;
+  for (unsigned i = 0; i < n; i++) {
+    const char c = body.charAt(i);
+    Serial.write((c >= 32 && c < 127) ? c : '.');
+  }
+  Serial.println();
 }
 
 static bool qweatherResponseOk(const String &body) {
+  if (body.indexOf("\"error\"") >= 0) {
+    return false;
+  }
+
   char code[16] = {};
-  if (parseJsonQuotedString(body, "code", code, sizeof(code))) {
+  if (parseQWeatherApiCode(body, code, sizeof(code))) {
     return strcmp(code, "200") == 0;
   }
   return body.indexOf("\"code\":\"200\"") >= 0 || body.indexOf("\"code\": \"200\"") >= 0 ||
@@ -461,8 +547,11 @@ static bool parseQWeatherDaily(const String &body, WeatherSnapshot *out) {
     return false;
   }
 
+  static const int kForecastDayOffset = 1;
+
   int searchFrom = dailyIdx;
-  for (int i = 0; i < WEATHER_DAILY_COUNT; i++) {
+  int dayIndex = 0;
+  while (dayIndex < kForecastDayOffset + WEATHER_DAILY_COUNT) {
     const int fxIdx = body.indexOf("\"fxDate\"", searchFrom);
     if (fxIdx < 0) {
       return false;
@@ -488,7 +577,7 @@ static bool parseQWeatherDaily(const String &body, WeatherSnapshot *out) {
     parseJsonFloatAfterKey(body, itemIdx, "tempMin", &lo);
     parseJsonIntAfterKey(body, itemIdx, "iconDay", &iconCode);
 
-    if (i == 0) {
+    if (dayIndex == 0) {
       char rise[8] = {};
       char set[8] = {};
       parseJsonQuotedStringAfter(body, itemIdx, "sunrise", rise, sizeof(rise));
@@ -499,36 +588,39 @@ static bool parseQWeatherDaily(const String &body, WeatherSnapshot *out) {
       if (set[0] != '\0') {
         snprintf(out->sunset, sizeof(out->sunset), "%s", set);
       }
+      out->hiToday = roundTemp(hi);
+      out->loToday = roundTemp(lo);
     }
 
-    out->daily[i].hi = roundTemp(hi);
-    out->daily[i].lo = roundTemp(lo);
-    out->daily[i].wmoCode = iconCode;
-    out->daily[i].icon = weather_service_qweather_icon_to_icon(iconCode);
-    if (textDay[0] != '\0') {
-      snprintf(out->daily[i].condition, sizeof(out->daily[i].condition), "%s", textDay);
-    } else {
-      snprintf(out->daily[i].condition, sizeof(out->daily[i].condition), "%s",
-               weather_service_wmo_to_label(iconCode));
+    if (dayIndex >= kForecastDayOffset) {
+      const int outIdx = dayIndex - kForecastDayOffset;
+      out->daily[outIdx].hi = roundTemp(hi);
+      out->daily[outIdx].lo = roundTemp(lo);
+      out->daily[outIdx].wmoCode = iconCode;
+      out->daily[outIdx].icon = weather_service_qweather_icon_to_icon(iconCode);
+      if (textDay[0] != '\0') {
+        snprintf(out->daily[outIdx].condition, sizeof(out->daily[outIdx].condition), "%s", textDay);
+      } else {
+        snprintf(out->daily[outIdx].condition, sizeof(out->daily[outIdx].condition), "%s",
+                 weather_service_wmo_to_label(iconCode));
+      }
+      out->daily[outIdx].wday = wdayFromIsoDate(fxDate);
+      dayLabelFromIsoDate(fxDate, outIdx, out->daily[outIdx].label, sizeof(out->daily[outIdx].label));
     }
-    out->daily[i].wday = wdayFromIsoDate(fxDate);
-    dayLabelFromIsoDate(fxDate, i, out->daily[i].label, sizeof(out->daily[i].label));
+
+    dayIndex++;
   }
 
-  out->hiToday = out->daily[0].hi;
-  out->loToday = out->daily[0].lo;
   return true;
 }
 
-static bool fetchQWeatherAir(const char *host, const char *apiKey, float lon, float lat,
+static bool fetchQWeatherAir(const char *host, const char *apiKey, const char *locationId,
                              WeatherSnapshot *out) {
-  char path[192];
-  snprintf(path, sizeof(path),
-           "/v7/air/now?location=%.4f,%.4f&key=%s",
-           lon, lat, apiKey);
+  char path[128];
+  snprintf(path, sizeof(path), "/v7/air/now?location=%s", locationId);
 
   String body;
-  if (!qweatherGet(host, path, "air", &body) || !qweatherResponseOk(body)) {
+  if (!qweatherGet(host, path, apiKey, "air", &body) || !qweatherResponseOk(body)) {
     return false;
   }
 
@@ -551,15 +643,13 @@ static bool fetchQWeatherAir(const char *host, const char *apiKey, float lon, fl
   return out->aqiValid;
 }
 
-static bool fetchQWeatherUv(const char *host, const char *apiKey, float lon, float lat,
-                              WeatherSnapshot *out) {
-  char path[192];
-  snprintf(path, sizeof(path),
-           "/v7/indices/1d?type=5&location=%.4f,%.4f&key=%s",
-           lon, lat, apiKey);
+static bool fetchQWeatherUv(const char *host, const char *apiKey, const char *locationId,
+                          WeatherSnapshot *out) {
+  char path[128];
+  snprintf(path, sizeof(path), "/v7/indices/1d?type=5&location=%s", locationId);
 
   String body;
-  if (!qweatherGet(host, path, "uv", &body) || !qweatherResponseOk(body)) {
+  if (!qweatherGet(host, path, apiKey, "uv", &body) || !qweatherResponseOk(body)) {
     return false;
   }
 
@@ -582,20 +672,28 @@ static bool fetchQWeatherUv(const char *host, const char *apiKey, float lon, flo
   return true;
 }
 
-static bool fetchQWeatherCityName(const char *host, const char *apiKey, float lon, float lat,
-                                  char *outLocation, size_t locationLen) {
-  const char *lang = app_locale_get() == APP_LANG_ZH ? "zh" : "en";
-  char path[192];
-  snprintf(path, sizeof(path),
-           "/geo/v2/city/lookup?location=%.4f,%.4f&key=%s&lang=%s",
-           lon, lat, apiKey, lang);
+static bool resolveQWeatherLocation(const char *host, const char *apiKey, float lon, float lat,
+                                  char *locationId, size_t locationIdLen, char *cityName,
+                                  size_t cityNameLen) {
+  if (locationId == nullptr || locationIdLen == 0) {
+    return false;
+  }
+  locationId[0] = '\0';
+  if (cityName != nullptr && cityNameLen > 0) {
+    cityName[0] = '\0';
+  }
+
+  char path[160];
+  snprintf(path, sizeof(path), "/geo/v2/city/lookup?location=%.2f,%.2f&lang=%s", lon, lat,
+           qweatherLangCode());
 
   String body;
-  if (!qweatherGet(host, path, "geo", &body) || !qweatherResponseOk(body)) {
+  if (!qweatherGet(host, path, apiKey, "geo", &body) || !qweatherResponseOk(body)) {
+    logQWeatherFailure("geo", body);
     return false;
   }
 
-  const int locIdx = body.indexOf("\"location\":");
+  const int locIdx = body.indexOf("\"location\"");
   if (locIdx < 0) {
     return false;
   }
@@ -605,20 +703,29 @@ static bool fetchQWeatherCityName(const char *host, const char *apiKey, float lo
     return false;
   }
 
+  char id[16] = {};
   char name[20] = {};
   char adm2[20] = {};
+  parseJsonQuotedStringAfter(body, itemIdx, "id", id, sizeof(id));
   parseJsonQuotedStringAfter(body, itemIdx, "name", name, sizeof(name));
   parseJsonQuotedStringAfter(body, itemIdx, "adm2", adm2, sizeof(adm2));
 
-  if (name[0] != '\0') {
-    snprintf(outLocation, locationLen, "%s", name);
-    return true;
+  if (id[0] == '\0') {
+    return false;
   }
-  if (adm2[0] != '\0') {
-    snprintf(outLocation, locationLen, "%s", adm2);
-    return true;
+
+  snprintf(locationId, locationIdLen, "%s", id);
+  if (cityName != nullptr && cityNameLen > 0) {
+    // QWeather "name" is often district-level (区); adm2 is prefecture/city (市).
+    if (adm2[0] != '\0') {
+      snprintf(cityName, cityNameLen, "%s", adm2);
+    } else if (name[0] != '\0') {
+      snprintf(cityName, cityNameLen, "%s", name);
+    }
   }
-  return false;
+  Serial.printf("[Weather] geo id=%s name=%s\n", locationId,
+                (cityName != nullptr && cityName[0] != '\0') ? cityName : "?");
+  return true;
 }
 
 static bool fetchWeather(WeatherSnapshot *out) {
@@ -639,14 +746,23 @@ static bool fetchWeather(WeatherSnapshot *out) {
     return false;
   }
 
-  const char *lang = app_locale_get() == APP_LANG_ZH ? "zh" : "en";
-  char path[256];
+  char locationId[16] = {};
+  char qLoc[sizeof(out->location)] = {};
+  if (!resolveQWeatherLocation(apiHost, apiKey, lon, lat, locationId, sizeof(locationId), qLoc,
+                               sizeof(qLoc))) {
+    snprintf(locationId, sizeof(locationId), "%.2f,%.2f", lon, lat);
+    Serial.printf("[Weather] geo lookup failed, fallback location=%s\n", locationId);
+  }
 
-  snprintf(path, sizeof(path),
-           "/v7/weather/now?location=%.4f,%.4f&key=%s&lang=%s",
-           lon, lat, apiKey, lang);
+  char path[128];
+  snprintf(path, sizeof(path), "/v7/weather/now?location=%s", locationId);
   String nowBody;
-  if (!qweatherGet(apiHost, path, "now", &nowBody)) {
+  if (!qweatherGet(apiHost, path, apiKey, "now", &nowBody)) {
+    return false;
+  }
+
+  if (!qweatherResponseOk(nowBody)) {
+    logQWeatherFailure("now", nowBody);
     return false;
   }
 
@@ -659,20 +775,19 @@ static bool fetchWeather(WeatherSnapshot *out) {
   snapshot.pm25Tenths = -1;
   if (!parseQWeatherNow(nowBody, &snapshot)) {
     char apiCode[16] = {};
-    parseJsonQuotedString(nowBody, "code", apiCode, sizeof(apiCode));
+    parseQWeatherApiCode(nowBody, apiCode, sizeof(apiCode));
     Serial.printf("[Weather] parse now failed api=%s hasNow=%d len=%u\n",
                   apiCode[0] != '\0' ? apiCode : "?",
                   nowBody.indexOf("\"now\"") >= 0 ? 1 : 0,
                   (unsigned)nowBody.length());
+    logQWeatherFailure("now", nowBody);
     return false;
   }
   snapshot.valid = true;
 
-  snprintf(path, sizeof(path),
-           "/v7/weather/3d?location=%.4f,%.4f&key=%s&lang=%s",
-           lon, lat, apiKey, lang);
+  snprintf(path, sizeof(path), "/v7/weather/7d?location=%s", locationId);
   String dailyBody;
-  if (!qweatherGet(apiHost, path, "3d", &dailyBody) || !parseQWeatherDaily(dailyBody, &snapshot)) {
+  if (!qweatherGet(apiHost, path, apiKey, "7d", &dailyBody) || !parseQWeatherDaily(dailyBody, &snapshot)) {
     Serial.println("[Weather] parse daily failed");
     snapshot.hiToday = snapshot.tempC;
     snapshot.loToday = snapshot.tempC;
@@ -687,11 +802,10 @@ static bool fetchWeather(WeatherSnapshot *out) {
     snprintf(snapshot.sunset, sizeof(snapshot.sunset), "--:--");
   }
 
-  fetchQWeatherAir(apiHost, apiKey, lon, lat, &snapshot);
-  fetchQWeatherUv(apiHost, apiKey, lon, lat, &snapshot);
+  fetchQWeatherAir(apiHost, apiKey, locationId, &snapshot);
+  fetchQWeatherUv(apiHost, apiKey, locationId, &snapshot);
 
-  char qLoc[sizeof(snapshot.location)] = {};
-  if (fetchQWeatherCityName(apiHost, apiKey, lon, lat, qLoc, sizeof(qLoc))) {
+  if (qLoc[0] != '\0') {
     snprintf(snapshot.location, sizeof(snapshot.location), "%s", qLoc);
   } else {
     snprintf(snapshot.location, sizeof(snapshot.location), "%s", location);
