@@ -16,5 +16,6 @@ void epaper_clear_main_area(void);
 bool epaper_is_partial_ready(void);
 void epaper_upload(bool fullRefresh);
 void epaper_upload_mode(bool fullInit, bool fastPartial);
+void epaper_draw_1bit_fullscreen(const uint8_t *bits, uint16_t bitsW, uint16_t bitsH);
 
 #endif

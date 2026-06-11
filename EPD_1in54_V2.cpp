@@ -7,6 +7,10 @@
 
 #define EPD_BUSY_TIMING_DEBUG 1
 #define EPD_BUSY_TIMEOUT_MS   35000
+/** GPIO1 (BUSY) shared with battery ADC — when BUSY reads idle instantly, pad full/partial refresh. */
+#define EPD_FULL_REFRESH_MIN_MS     4500
+#define EPD_PARTIAL_REFRESH_MIN_MS  400
+#define EPD_CLEAR_REFRESH_MIN_MS    22000
 
 static uint32_t epd_busy_read_count = 0;
 
@@ -109,6 +113,9 @@ static uint32_t EPD_1IN54_V2_ReadBusy(const char *label)
 #endif
             return millis() - start;
         }
+        if ((samples & 0x3F) == 0) {
+            yield();
+        }
         DEV_Delay_ms(1);
     }
 
@@ -122,12 +129,34 @@ static uint32_t EPD_1IN54_V2_ReadBusy(const char *label)
     return elapsed;
 }
 
+static void EPD_1IN54_V2_WaitBusyMin(const char *label, uint32_t minMs)
+{
+    const uint32_t elapsed = EPD_1IN54_V2_ReadBusy(label);
+    if (minMs == 0 || elapsed >= minMs) {
+        return;
+    }
+    const uint32_t pad = minMs - elapsed;
+#if EPD_BUSY_TIMING_DEBUG
+    Serial.printf("[EPD] BUSY pad   #%-3lu %-20s +%lums (GPIO1)\r\n",
+                  epd_busy_read_count, label, (unsigned long)pad);
+#endif
+    DEV_Delay_ms(pad);
+}
+
 static void EPD_1IN54_V2_TurnOnDisplay(void)
 {
     EPD_1IN54_V2_SendCommand(0x22);
     EPD_1IN54_V2_SendData(0xc7);
     EPD_1IN54_V2_SendCommand(0x20);
-    EPD_1IN54_V2_ReadBusy("display-full");
+    EPD_1IN54_V2_WaitBusyMin("display-full", EPD_FULL_REFRESH_MIN_MS);
+}
+
+static void EPD_1IN54_V2_TurnOnDisplayClear(void)
+{
+    EPD_1IN54_V2_SendCommand(0x22);
+    EPD_1IN54_V2_SendData(0xc7);
+    EPD_1IN54_V2_SendCommand(0x20);
+    EPD_1IN54_V2_WaitBusyMin("display-clear", EPD_CLEAR_REFRESH_MIN_MS);
 }
 
 static void EPD_1IN54_V2_TurnOnDisplayPart(void)
@@ -135,7 +164,7 @@ static void EPD_1IN54_V2_TurnOnDisplayPart(void)
     EPD_1IN54_V2_SendCommand(0x22);
     EPD_1IN54_V2_SendData(0xcF);
     EPD_1IN54_V2_SendCommand(0x20);
-    EPD_1IN54_V2_ReadBusy("display-partial");
+    EPD_1IN54_V2_WaitBusyMin("display-partial", EPD_PARTIAL_REFRESH_MIN_MS);
 }
 
 static void EPD_1IN54_V2_Lut(UBYTE *lut)
@@ -245,7 +274,7 @@ void EPD_1IN54_V2_Init_Partial(void)
     EPD_1IN54_V2_SendCommand(0x22);
     EPD_1IN54_V2_SendData(0xc0);
     EPD_1IN54_V2_SendCommand(0x20);
-    EPD_1IN54_V2_ReadBusy("partial-init-power");
+    EPD_1IN54_V2_WaitBusyMin("partial-init-power", EPD_PARTIAL_REFRESH_MIN_MS);
 }
 
 void EPD_1IN54_V2_Clear(void)
@@ -275,9 +304,9 @@ void EPD_1IN54_V2_Clear(void)
     }
 
 #if EPD_BUSY_TIMING_DEBUG
-    Serial.println("[EPD] Clear: full refresh (~25s, wait BUSY)...");
+    Serial.println("[EPD] Clear: full refresh (~22s min)...");
 #endif
-    EPD_1IN54_V2_TurnOnDisplay();
+    EPD_1IN54_V2_TurnOnDisplayClear();
 }
 
 void EPD_1IN54_V2_Display(UBYTE *Image)

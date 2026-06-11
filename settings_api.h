@@ -27,8 +27,10 @@ AppLanguage settings_api_get_language(void);
 void settings_api_set_language(AppLanguage lang);
 
 void settings_api_request_portal_restart(void);
+void settings_api_request_wallpaper_portal_restart(void);
 void settings_api_forget_wifi_and_restart(void);
 
 bool settings_api_consume_force_portal_boot(void);
+bool settings_api_consume_force_wallpaper_portal_boot(void);
 
 #endif

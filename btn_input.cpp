@@ -26,7 +26,7 @@ static BtnAction s_serialPending = BTN_ACTION_NONE;
 static void print_serial_help(void) {
   Serial.println("[BtnSim] Serial keys (115200, line ending Any):");
   Serial.println("  n = A click (next)   p = A double (prev)   b = A long (back)");
-  Serial.println("  c = B click (confirm)   v = B double (voice)   h = this help");
+  Serial.println("  c = B click (confirm)   v = B double (voice)   w = B long (wallpaper)   h = help");
 }
 
 static bool readRawDown(BtnId id) {
@@ -38,6 +38,9 @@ static BtnAction actionFor(BtnId id, uint8_t clickCount, bool isLong) {
   if (isLong) {
     if (id == BTN_ID_A) {
       return BTN_ACTION_BACK;
+    }
+    if (id == BTN_ID_B) {
+      return BTN_ACTION_WALLPAPER_TOGGLE;
     }
     return BTN_ACTION_NONE;
   }
@@ -125,6 +128,9 @@ static BtnAction action_from_serial_char(char ch) {
     case 'v':
     case 'V':
       return BTN_ACTION_VOICE_TOGGLE;
+    case 'w':
+    case 'W':
+      return BTN_ACTION_WALLPAPER_TOGGLE;
     default:
       return BTN_ACTION_NONE;
   }

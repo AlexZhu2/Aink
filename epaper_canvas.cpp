@@ -88,3 +88,40 @@ void epaper_upload_mode(bool fullInit, bool fastPartial) {
 
   EPD_1IN54_V2_DisplayPartBaseImage(s_blackImage);
 }
+
+void epaper_draw_1bit_fullscreen(const uint8_t *bits, uint16_t bitsW, uint16_t bitsH) {
+  if (bits == nullptr || bitsW == 0 || bitsH == 0) {
+    return;
+  }
+
+  const UWORD dstW = EPD_1IN54_V2_WIDTH;
+  const UWORD dstH = EPD_1IN54_V2_HEIGHT;
+  const uint16_t offX = (bitsW > dstW) ? static_cast<uint16_t>((bitsW - dstW) / 2) : 0;
+  const uint16_t offY = (bitsH > dstH) ? static_cast<uint16_t>((bitsH - dstH) / 2) : 0;
+  const UWORD srcRowBytes = static_cast<UWORD>((bitsW + 7) / 8);
+
+  epaper_clear_white();
+  for (UWORD ly = 0; ly < dstH; ly++) {
+    for (UWORD lx = 0; lx < dstW; lx++) {
+      const uint16_t sx = offX + lx;
+      const uint16_t sy = offY + ly;
+      const size_t index = static_cast<size_t>(sy) * srcRowBytes + sx / 8;
+      const uint8_t mask = static_cast<uint8_t>(0x80 >> (sx % 8));
+      const bool black = (bits[index] & mask) == 0;
+
+      UWORD px;
+      UWORD py;
+      mapToBuffer(lx, ly, &px, &py);
+      if (px >= EPD_1IN54_V2_WIDTH || py >= EPD_1IN54_V2_HEIGHT) {
+        continue;
+      }
+      const UWORD bufIndex = (px / 8) + py * kRowBytes;
+      const UBYTE bufMask = static_cast<UBYTE>(0x80 >> (px % 8));
+      if (black) {
+        s_blackImage[bufIndex] &= static_cast<UBYTE>(~bufMask);
+      } else {
+        s_blackImage[bufIndex] |= bufMask;
+      }
+    }
+  }
+}

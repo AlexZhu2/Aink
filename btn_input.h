@@ -21,6 +21,7 @@ enum BtnAction {
   BTN_ACTION_BACK,          // A long press
   BTN_ACTION_CONFIRM,       // B click
   BTN_ACTION_VOICE_TOGGLE,  // B double click
+  BTN_ACTION_WALLPAPER_TOGGLE,  // B long press
 };
 
 void btn_input_init(void);

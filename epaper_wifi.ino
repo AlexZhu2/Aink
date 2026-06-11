@@ -18,6 +18,7 @@
 #include "settings_api.h"
 #include "app_locale.h"
 #include "camera_service.h"
+#include "wallpaper_service.h"
 
 extern "C" {
 #include "qrcode.h"
@@ -54,13 +55,31 @@ static int lastWeatherIcon = -1;
 static int lastWeatherTemp = -999;
 static bool portalModeActive = false;
 static bool portalWebStarted = false;
+static uint8_t *wallpaperUploadBuf = nullptr;
+static size_t wallpaperUploadLen = 0;
+static bool wallpaperUploadOverflow = false;
+static bool wallpaperSavePending = false;
+
+enum WallpaperEpdOp {
+  WALLPAPER_EPD_IDLE = 0,
+  WALLPAPER_EPD_SHOW,
+  WALLPAPER_EPD_HIDE,
+};
+static WallpaperEpdOp s_wallpaperEpdOp = WALLPAPER_EPD_IDLE;
 static int wifiReconnectFailures = 0;
 static char portalApSsid[24];
 
 static bool syncNetworkTime();
 static void drawStatusBarRegion(UBYTE *image, int batteryPercent, bool wifiConnected,
                                 bool showWeather, WeatherIconKind weatherIcon, int weatherTempC);
-static void refreshMainUiOnDisplay(UiRefreshMode mode);
+static void refreshMainUiOnDisplay(UiRefreshMode mode, bool skipEpdUpload = false);
+static void showWallpaperOnDisplay(void);
+static void handleWallpaperToggle(void);
+static void processWallpaperEpdPending(void);
+
+static bool wallpaperFullscreenLocked(void) {
+  return wallpaper_view_is_active() && s_wallpaperEpdOp == WALLPAPER_EPD_IDLE;
+}
 
 static void setEpaperPixel(UBYTE *image, UWORD lx, UWORD ly, bool black) {
   (void)image;
@@ -157,6 +176,11 @@ static void drawText(UBYTE *image, const char *text, UWORD x, UWORD y) {
 static void buildPortalApSsid() {
   const uint64_t chipId = ESP.getEfuseMac();
   snprintf(portalApSsid, sizeof(portalApSsid), "Epaper-%04X", (uint16_t)(chipId & 0xFFFF));
+}
+
+static void buildWallpaperPortalApSsid() {
+  const uint64_t chipId = ESP.getEfuseMac();
+  snprintf(portalApSsid, sizeof(portalApSsid), "AinkWP-%04X", (uint16_t)(chipId & 0xFFFF));
 }
 
 static bool loadStoredWiFiCredentials(String &outSsid, String &outPass) {
@@ -261,12 +285,32 @@ static void drawSetupScreen(UBYTE *image) {
   drawText(image, "192.168.4.1", 52, 182);
 }
 
+static void drawWallpaperSetupScreen(UBYTE *image) {
+  char qrPayload[96];
+  snprintf(qrPayload, sizeof(qrPayload), "WIFI:T:nopass;S:%s;;", portalApSsid);
+
+  memset(image, 0xFF, 5000);
+  drawText(image, "WALLPAPER", 44, 6);
+  drawText(image, "SCAN QR", 56, 22);
+  drawQrCodeScaled(image, qrPayload, 30, 38, 140);
+  drawText(image, portalApSsid, 28, 168);
+  drawText(image, "192.168.4.1", 52, 182);
+}
+
 static void showSetupScreenOnEpaper() {
   epaper_set_portal_mirror(true);
   drawSetupScreen(epaper_get_buffer());
   EPD_1IN54_V2_Init();
   EPD_1IN54_V2_DisplayPartBaseImage(epaper_get_buffer());
   Serial.println("[EPD] setup QR screen shown");
+}
+
+static void showWallpaperSetupScreenOnEpaper() {
+  epaper_set_portal_mirror(true);
+  drawWallpaperSetupScreen(epaper_get_buffer());
+  EPD_1IN54_V2_Init();
+  EPD_1IN54_V2_DisplayPartBaseImage(epaper_get_buffer());
+  Serial.println("[EPD] wallpaper QR screen shown");
 }
 
 static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
@@ -428,6 +472,132 @@ static void setupPortalWebRoutes() {
   portalWebStarted = true;
 }
 
+static const char WALLPAPER_PORTAL_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Aink Wallpaper</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; background: #f5f5f5; }
+    .card { background: #fff; border-radius: 12px; padding: 20px; max-width: 420px; margin: 0 auto 16px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+    h2 { margin-top: 0; }
+    label { display: block; margin: 12px 0 6px; font-size: 14px; color: #444; }
+    input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; }
+    button { margin-top: 18px; width: 100%; padding: 12px; font-size: 16px; border: 0; border-radius: 8px; background: #111; color: #fff; }
+    .hint { margin-top: 16px; font-size: 13px; color: #666; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Wallpaper</h2>
+    <form action="/save_wallpaper" method="POST" enctype="multipart/form-data">
+      <label for="wallpaper">JPG image</label>
+      <input id="wallpaper" name="wallpaper" type="file" accept="image/jpeg,.jpg,.jpeg" required>
+      <button type="submit">Upload wallpaper</button>
+    </form>
+    <p class="hint">Only one wallpaper is stored (240×240, 1-bit). Upload replaces the previous image. Device reboots after a successful upload.</p>
+  </div>
+</body>
+</html>
+)rawliteral";
+
+static void handleWallpaperPortalRoot() {
+  portalServer.send_P(200, "text/html; charset=utf-8", WALLPAPER_PORTAL_HTML);
+}
+
+static void resetWallpaperUploadState() {
+  wallpaperUploadLen = 0;
+  wallpaperUploadOverflow = false;
+  if (wallpaperUploadBuf != nullptr) {
+    free(wallpaperUploadBuf);
+    wallpaperUploadBuf = nullptr;
+  }
+}
+
+static void handleWallpaperUploadPost() {
+  if (wallpaperUploadOverflow || wallpaperUploadLen == 0 || wallpaperUploadBuf == nullptr) {
+    resetWallpaperUploadState();
+    portalServer.send(400, "text/html; charset=utf-8",
+                      "<meta charset=utf-8><p>Upload failed or file too large (max 150KB).</p>"
+                      "<a href='/'>Back</a>");
+    return;
+  }
+
+  /* Decode on the main loop task — WebServer runs on a tiny stack (~8KB). */
+  wallpaperSavePending = true;
+  portalServer.send(200, "text/html; charset=utf-8",
+                    "<!DOCTYPE html><html><head><meta charset=utf-8>"
+                    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                    "</head><body><h2>Upload received</h2>"
+                    "<p>Converting wallpaper… device will reboot when done.</p></body></html>");
+}
+
+static void processPendingWallpaperSave() {
+  if (!wallpaperSavePending) {
+    return;
+  }
+  wallpaperSavePending = false;
+
+  Serial.printf("[WallpaperPortal] decoding %u bytes\n", (unsigned)wallpaperUploadLen);
+  const bool saved = wallpaper_service_save_from_jpeg(wallpaperUploadBuf, wallpaperUploadLen);
+  resetWallpaperUploadState();
+
+  if (!saved) {
+    Serial.println("[WallpaperPortal] decode/save failed");
+    return;
+  }
+
+  Serial.println("[WallpaperPortal] saved, rebooting");
+  delay(500);
+  ESP.restart();
+}
+
+static void handleWallpaperUploadFile() {
+  HTTPUpload &upload = portalServer.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    resetWallpaperUploadState();
+    wallpaperUploadBuf = static_cast<uint8_t *>(
+        heap_caps_malloc(WALLPAPER_UPLOAD_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (wallpaperUploadBuf == nullptr) {
+      wallpaperUploadBuf = static_cast<uint8_t *>(malloc(WALLPAPER_UPLOAD_MAX));
+    }
+    if (wallpaperUploadBuf == nullptr) {
+      wallpaperUploadOverflow = true;
+    }
+    Serial.printf("[WallpaperPortal] upload start: %s\n", upload.filename.c_str());
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (wallpaperUploadBuf == nullptr || wallpaperUploadOverflow) {
+      return;
+    }
+    if (wallpaperUploadLen + upload.currentSize > WALLPAPER_UPLOAD_MAX) {
+      wallpaperUploadOverflow = true;
+      return;
+    }
+    memcpy(wallpaperUploadBuf + wallpaperUploadLen, upload.buf, upload.currentSize);
+    wallpaperUploadLen += upload.currentSize;
+  }
+}
+
+static void setupWallpaperPortalWebRoutes() {
+  if (portalWebStarted) {
+    return;
+  }
+
+  portalServer.on("/", HTTP_GET, handleWallpaperPortalRoot);
+  portalServer.on("/save_wallpaper", HTTP_POST, handleWallpaperUploadPost, handleWallpaperUploadFile);
+  portalServer.on("/generate_204", HTTP_GET, handleWallpaperPortalRoot);
+  portalServer.on("/hotspot-detect.html", HTTP_GET, handleWallpaperPortalRoot);
+  portalServer.on("/fwlink", HTTP_GET, handleWallpaperPortalRoot);
+  portalServer.onNotFound([]() {
+    portalServer.sendHeader("Location", "http://192.168.4.1/", true);
+    portalServer.send(302, "text/plain", "");
+  });
+  portalServer.begin();
+  portalWebStarted = true;
+}
+
 static void enterPortalMode() {
   buildPortalApSsid();
   WiFi.mode(WIFI_AP);
@@ -441,9 +611,24 @@ static void enterPortalMode() {
   showSetupScreenOnEpaper();
 }
 
+static void enterWallpaperPortalMode() {
+  buildWallpaperPortalApSsid();
+  wallpaper_service_init();
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(portalApSsid);
+  portalDnsServer.start(WIFI_PORTAL_DNS_PORT, "*", WiFi.softAPIP());
+  setupWallpaperPortalWebRoutes();
+
+  portalModeActive = true;
+  Serial.printf("[WallpaperPortal] AP: %s  open  IP: %s\n",
+                portalApSsid, WiFi.softAPIP().toString().c_str());
+  showWallpaperSetupScreenOnEpaper();
+}
+
 static void startNormalOperation() {
   portalModeActive = false;
   epaper_set_portal_mirror(false);
+  wallpaper_service_init();
   if (WiFi.status() == WL_CONNECTED) {
     syncNetworkTime();
   }
@@ -687,7 +872,7 @@ static void drawStatusBarRegion(UBYTE *image, int batteryPercent, bool wifiConne
   drawHorizontalLine(image, barLineY);
 }
 
-static void refreshMainUiOnDisplay(UiRefreshMode mode) {
+static void refreshMainUiOnDisplay(UiRefreshMode mode, bool skipEpdUpload) {
   if (mode == UI_REFRESH_NONE) {
     return;
   }
@@ -724,7 +909,9 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
                         weather.valid, weather.icon, weather.tempC);
   }
 
-  epaper_upload_mode(fullInit, fastEpd);
+  if (!skipEpdUpload) {
+    epaper_upload_mode(fullInit, fastEpd);
+  }
 
   if (!fullLvgl || mode == UI_REFRESH_NAV) {
     return;
@@ -750,6 +937,48 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
   }
 }
 
+static void showWallpaperOnDisplay(void) {
+  Serial.println("[Wallpaper] draw + display");
+  wallpaper_service_draw_full(epaper_get_buffer(), EPD_1IN54_V2_WIDTH, EPD_1IN54_V2_HEIGHT);
+  epaper_upload(true);
+  Serial.println("[Wallpaper] shown");
+}
+
+static void handleWallpaperToggle(void) {
+  if (!wallpaper_service_has_wallpaper()) {
+    Serial.println("[Wallpaper] none stored");
+    return;
+  }
+  if (s_wallpaperEpdOp != WALLPAPER_EPD_IDLE) {
+    Serial.println("[Wallpaper] EPD busy, please wait");
+    return;
+  }
+
+  if (wallpaper_view_is_active()) {
+    Serial.println("[Wallpaper] exit requested");
+    wallpaper_view_set_active(false);
+    s_wallpaperEpdOp = WALLPAPER_EPD_HIDE;
+    return;
+  }
+
+  Serial.println("[Wallpaper] show requested");
+  s_wallpaperEpdOp = WALLPAPER_EPD_SHOW;
+}
+
+static void processWallpaperEpdPending(void) {
+  if (s_wallpaperEpdOp == WALLPAPER_EPD_SHOW) {
+    showWallpaperOnDisplay();
+    wallpaper_view_set_active(true);
+    s_wallpaperEpdOp = WALLPAPER_EPD_IDLE;
+    return;
+  }
+  if (s_wallpaperEpdOp == WALLPAPER_EPD_HIDE) {
+    Serial.println("[Wallpaper] back to UI");
+    refreshMainUiOnDisplay(UI_REFRESH_NAV);
+    s_wallpaperEpdOp = WALLPAPER_EPD_IDLE;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -757,7 +986,10 @@ void setup() {
 
   DEV_Module_Init();
 
-  if (settings_api_consume_force_portal_boot()) {
+  if (settings_api_consume_force_wallpaper_portal_boot()) {
+    Serial.println("[Wallpaper] Entering wallpaper upload portal");
+    enterWallpaperPortalMode();
+  } else if (settings_api_consume_force_portal_boot()) {
     Serial.println("[WiFi] Entering config portal (settings request)");
     enterPortalMode();
   } else if (tryConnectStoredWiFi(WIFI_CONNECT_TIMEOUT_MS)) {
@@ -772,31 +1004,47 @@ void loop() {
   if (portalModeActive) {
     portalDnsServer.processNextRequest();
     portalServer.handleClient();
+    processPendingWallpaperSave();
     delay(10);
     return;
   }
 
-  weather_service_update(false);
-
   btn_input_update();
   btn_input_serial_poll();
-  ui_lvgl_tick();
+  processWallpaperEpdPending();
+
+  if (!wallpaperFullscreenLocked()) {
+    weather_service_update(false);
+    ui_lvgl_tick();
+  }
 
   BtnAction btnAction = BTN_ACTION_NONE;
-  while (btn_input_consume(&btnAction)) {
-    UiRefreshMode navMode = UI_REFRESH_NONE;
-    if (ui_nav_handle(btnAction, &navMode)) {
-      refreshMainUiOnDisplay(navMode);
-      if (ui_vision_consume_capture_request()) {
-        Serial.println("[Vision] capture pipeline running (blocks up to ~60s)");
-        Serial.flush();
-        ui_vision_run_capture();
-        Serial.println("[Vision] capture pipeline done");
-        Serial.flush();
-        /* DisplayPart 与「分析中」时一致；QUALITY 的 BaseImage 在此状态下可能不更新可见区域 */
-        refreshMainUiOnDisplay(UI_REFRESH_NAV);
+  if (btn_input_consume(&btnAction)) {
+    if (btnAction == BTN_ACTION_WALLPAPER_TOGGLE) {
+      handleWallpaperToggle();
+    } else if (wallpaperFullscreenLocked()) {
+      Serial.println("[Wallpaper] ignored key in fullscreen (w/B-long to exit)");
+    } else if (s_wallpaperEpdOp != WALLPAPER_EPD_IDLE) {
+      Serial.println("[Wallpaper] EPD busy, key ignored");
+    } else {
+      UiRefreshMode navMode = UI_REFRESH_NONE;
+      if (ui_nav_handle(btnAction, &navMode)) {
+        refreshMainUiOnDisplay(navMode);
+        if (ui_vision_consume_capture_request()) {
+          Serial.println("[Vision] capture pipeline running (blocks up to ~60s)");
+          Serial.flush();
+          ui_vision_run_capture();
+          Serial.println("[Vision] capture pipeline done");
+          Serial.flush();
+          refreshMainUiOnDisplay(UI_REFRESH_NAV);
+        }
       }
     }
+  }
+
+  if (wallpaperFullscreenLocked()) {
+    delay(50);
+    return;
   }
 
   const bool wifiConnected = isWifiConnected();

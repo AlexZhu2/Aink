@@ -43,7 +43,7 @@ Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
 | Weather | Forecast, metrics, AQI, 3-day outlook |
 | **AI Vision** | Camera capture + cloud poetic description (≤40 Chinese chars) |
 | App 3 | Placeholder |
-| Settings | WiFi, **AI provider/model/API key**, Display, About; EN/ZH |
+| Settings | WiFi, **AI provider/model/API key**, Display (wallpaper), About; EN/ZH |
 
 ### AI Vision
 
@@ -64,10 +64,19 @@ Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
 
 Configure API key via captive portal or Settings. MiMo keys often start with `tp-`; Kimi Platform uses keys from [platform.kimi.ai](https://platform.kimi.ai).
 
+### Wallpaper
+
+- **Upload**: Settings → Display → **Upload wallpaper** → device reboots into AP `AinkWP-xxxx` → scan QR → open captive portal → upload JPG (max 150KB, up to 1024×1024)
+- **Storage**: one wallpaper in LittleFS (`/wallpaper.bin`, 240×240 1-bit); new upload replaces the old one
+- **View**: **B long press** (serial `w`) toggles wallpaper ↔ UI. Enter uses base-image full refresh (no Init while UI partial mode is active); exit uses Init + base image (~4.5s). After exit, the next 5 UI updates avoid fast partial refresh.
+- **Delete**: Settings → Display → delete row (when wallpaper is set)
+
+LittleFS uses the default ESP32 partition scheme; **Huge APP (3MB+)** includes a filesystem region. First mount may format the partition if empty.
+
 ### i18n
 
 - Default language: **English**
-- Switch: **Settings → Display → Language** (press B to toggle)
+- Switch: **Settings → Display → Language** (last row; press B to toggle)
 - Preference saved in NVS (`lang` key)
 - UI fonts: `aink_3500_12.c` / `aink_3500_14.c` (~3500 common Chinese + UI strings)
 
@@ -93,6 +102,7 @@ With `BTN_SERIAL_SIM=1` in `btn_input.h`:
 | b | A long (back) |
 | c | B confirm |
 | v | B double (voice stub) |
+| w | B long (wallpaper toggle) |
 | h | help |
 
 ### Test vision API on PC (before flashing)
@@ -143,6 +153,7 @@ camera_service.*      XIAO Sense camera (240×240 JPEG)
 ai_model_config.*     Provider/model presets and URLs
 app_locale.*          EN/ZH strings
 settings_api.*        NVS (WiFi, language, AI key, provider, model)
+wallpaper_service.*   LittleFS wallpaper storage, JPG→1-bit, fullscreen draw
 weather_service.*     Open-Meteo + air quality + geo
 aink_3500_12/14.c     LVGL CJK fonts (~3500 chars)
 tools/                Font/icons/API test scripts

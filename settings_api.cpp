@@ -13,6 +13,7 @@
 #define PREFS_KEY_SSID         "ssid"
 #define PREFS_KEY_PASS         "pass"
 #define PREFS_KEY_FORCE_PORTAL "force_portal"
+#define PREFS_KEY_FORCE_WALLPAPER_PORTAL "force_wp_portal"
 #define PREFS_KEY_LANGUAGE     "lang"
 #define PREFS_KEY_AI_PROVIDER  "ai_provider"
 #define PREFS_KEY_AI_MODEL_IDX "ai_model"
@@ -191,6 +192,16 @@ void settings_api_request_portal_restart(void) {
   ESP.restart();
 }
 
+void settings_api_request_wallpaper_portal_restart(void) {
+  Serial.println("[Settings] restart -> wallpaper portal");
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, false);
+  prefs.putBool(PREFS_KEY_FORCE_WALLPAPER_PORTAL, true);
+  prefs.end();
+  delay(200);
+  ESP.restart();
+}
+
 void settings_api_forget_wifi_and_restart(void) {
   Serial.println("[Settings] forget WiFi and restart");
   Preferences prefs;
@@ -216,5 +227,21 @@ bool settings_api_consume_force_portal_boot(void) {
   prefs.remove(PREFS_KEY_FORCE_PORTAL);
   prefs.end();
   Serial.println("[Settings] force portal boot flag consumed");
+  return true;
+}
+
+bool settings_api_consume_force_wallpaper_portal_boot(void) {
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, true);
+  const bool forcePortal = prefs.getBool(PREFS_KEY_FORCE_WALLPAPER_PORTAL, false);
+  prefs.end();
+  if (!forcePortal) {
+    return false;
+  }
+
+  prefs.begin(PREFS_NAMESPACE, false);
+  prefs.remove(PREFS_KEY_FORCE_WALLPAPER_PORTAL);
+  prefs.end();
+  Serial.println("[Settings] force wallpaper portal boot flag consumed");
   return true;
 }

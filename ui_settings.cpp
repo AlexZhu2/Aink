@@ -4,6 +4,7 @@
 #include "app_locale.h"
 #include "settings_api.h"
 #include "ui_fonts.h"
+#include "wallpaper_service.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -64,7 +65,7 @@ static int page_row_count(SettingsPage page) {
     case SETTINGS_PAGE_MODEL_PRESET:
       return ai_provider_model_count(settings_api_get_provider());
     case SETTINGS_PAGE_DISPLAY:
-      return 3;
+      return 5;
     case SETTINGS_PAGE_ABOUT:
       return 2;
     default:
@@ -104,7 +105,7 @@ static bool page_row_is_action(SettingsPage page, int row) {
   if (page == SETTINGS_PAGE_MODEL) {
     return row == 3 || row == 4;
   }
-  if (page == SETTINGS_PAGE_DISPLAY && row == 2) {
+  if (page == SETTINGS_PAGE_DISPLAY && (row == 2 || row == 3)) {
     return true;
   }
   return false;
@@ -219,6 +220,16 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
           snprintf(out, outLen, "%s", app_tr(TR_REFRESH_AUTO));
           break;
         case 2:
+          snprintf(out, outLen, "%s", app_tr(TR_UPLOAD_WALLPAPER));
+          break;
+        case 3:
+          if (wallpaper_service_has_wallpaper()) {
+            snprintf(out, outLen, "%s", app_tr(TR_DELETE_WALLPAPER));
+          } else {
+            snprintf(out, outLen, "%s: --", app_tr(TR_WALLPAPER_SET));
+          }
+          break;
+        case 4:
           snprintf(out, outLen, "%s %s", app_tr(TR_LANGUAGE), language_value_label());
           break;
         default:
@@ -431,9 +442,20 @@ SettingsActivateResult ui_settings_activate(void) {
     return SETTINGS_ACT_NONE;
   }
 
-  if (s_page == SETTINGS_PAGE_DISPLAY && s_focusRow == 2) {
-    app_locale_toggle();
-    return SETTINGS_ACT_LOCALE;
+  if (s_page == SETTINGS_PAGE_DISPLAY) {
+    if (s_focusRow == 4) {
+      app_locale_toggle();
+      return SETTINGS_ACT_LOCALE;
+    }
+    if (s_focusRow == 2) {
+      settings_api_request_wallpaper_portal_restart();
+      return SETTINGS_ACT_RESTART;
+    }
+    if (s_focusRow == 3 && wallpaper_service_has_wallpaper()) {
+      wallpaper_service_delete();
+      update_menu_view();
+    }
+    return SETTINGS_ACT_NONE;
   }
 
   if (!page_row_is_action(s_page, s_focusRow)) {
