@@ -553,7 +553,7 @@ VisionResult vision_service_describe_camera(char *outText, size_t outLen) {
   Serial.println("[Vision] describe start");
   Serial.flush();
 
-  if (!camera_service_is_ready()) {
+  if (!camera_service_is_ready() && !camera_service_init()) {
     Serial.println("[Vision] no camera");
     return VISION_RESULT_NO_CAMERA;
   }
@@ -625,7 +625,6 @@ VisionResult vision_service_describe_camera(char *outText, size_t outLen) {
     const char *url = ai_provider_chat_completions_url(provider);
     if (url == nullptr || url[0] == '\0') {
       free(base64);
-      camera_service_init();
       return VISION_RESULT_UNSUPPORTED;
     }
     result = requestOpenAiCompatible(provider, url, apiKey, model, base64, outText, outLen);
@@ -635,8 +634,5 @@ VisionResult vision_service_describe_camera(char *outText, size_t outLen) {
     Serial.printf("[Vision] %s\r\n", outText);
   }
 
-  if (!camera_service_init()) {
-    Serial.println("[Vision] camera re-init failed after HTTP");
-  }
   return result;
 }

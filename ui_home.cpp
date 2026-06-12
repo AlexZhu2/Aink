@@ -18,11 +18,14 @@ static lv_obj_t *s_tiles[4];
 static lv_obj_t *s_tileLabels[4];
 static lv_obj_t *s_weatherIconCanvas = nullptr;
 static lv_obj_t *s_weatherTempLabel = nullptr;
+static lv_obj_t *s_visionIconCanvas = nullptr;
+static lv_obj_t *s_visionHintLabel = nullptr;
 static lv_obj_t *s_settingsIconCanvas = nullptr;
 static lv_obj_t *s_settingsStatusLabel = nullptr;
 static lv_obj_t *s_detailTitle = nullptr;
 static lv_obj_t *s_detailBody = nullptr;
 static lv_color_t s_weatherIconBuf[WEATHER_TILE_ICON_PX * WEATHER_TILE_ICON_PX];
+static lv_color_t s_visionIconBuf[SETTINGS_TILE_ICON_PX * SETTINGS_TILE_ICON_PX];
 static lv_color_t s_settingsIconBuf[SETTINGS_TILE_ICON_PX * SETTINGS_TILE_ICON_PX];
 static int s_focusIndex = 0;
 
@@ -73,17 +76,23 @@ static void canvas_set_weather_icon(lv_obj_t *canvas, WeatherIconKind kind) {
   }
 }
 
-static void canvas_set_settings_icon(lv_obj_t *canvas) {
-  for (int row = 0; row < SETTINGS_TILE_ICON_PX; row++) {
-    const int srcRow = (row * SETTINGS_ICON_SIZE) / SETTINGS_TILE_ICON_PX;
-    const uint16_t mask = settings_gear_bitmap[srcRow];
-    for (int col = 0; col < SETTINGS_TILE_ICON_PX; col++) {
-      const int srcCol = (col * SETTINGS_ICON_SIZE) / SETTINGS_TILE_ICON_PX;
-      const bool black = (mask >> (SETTINGS_ICON_SIZE - 1 - srcCol)) & 0x01;
+static void canvas_set_bitmap_icon(lv_obj_t *canvas, int size, const uint32_t *bitmap) {
+  for (int row = 0; row < size; row++) {
+    const uint32_t mask = bitmap[row];
+    for (int col = 0; col < size; col++) {
+      const bool black = (mask >> (SETTINGS_ICON_SIZE - 1 - col)) & 0x01;
       lv_canvas_set_px(canvas, col, row,
                        black ? lv_color_black() : lv_color_white());
     }
   }
+}
+
+static void canvas_set_settings_icon(lv_obj_t *canvas) {
+  canvas_set_bitmap_icon(canvas, SETTINGS_TILE_ICON_PX, settings_gear_bitmap);
+}
+
+static void canvas_set_vision_icon(lv_obj_t *canvas) {
+  canvas_set_bitmap_icon(canvas, SETTINGS_TILE_ICON_PX, vision_eye_bitmap);
 }
 
 static void bind_weather_tile(void) {
@@ -103,6 +112,15 @@ static void bind_weather_tile(void) {
     snprintf(tempLine, sizeof(tempLine), "--");
   }
   lv_label_set_text(s_weatherTempLabel, tempLine);
+}
+
+static void bind_vision_tile(void) {
+  if (s_visionIconCanvas == nullptr || s_visionHintLabel == nullptr) {
+    return;
+  }
+
+  canvas_set_vision_icon(s_visionIconCanvas);
+  lv_label_set_text(s_visionHintLabel, app_tr(TR_VISION_HINT));
 }
 
 static void bind_settings_tile(void) {
@@ -189,6 +207,23 @@ void ui_home_init(void) {
       style_tile_text(s_tileLabels[i]);
       lv_obj_align(s_tileLabels[i], LV_ALIGN_TOP_MID, 0, 58);
       bind_weather_tile();
+    } else if (i == 1) {
+      s_visionIconCanvas = lv_canvas_create(s_tiles[i]);
+      lv_canvas_set_buffer(s_visionIconCanvas, s_visionIconBuf,
+                           SETTINGS_TILE_ICON_PX, SETTINGS_TILE_ICON_PX,
+                           LV_IMG_CF_TRUE_COLOR);
+      lv_obj_align(s_visionIconCanvas, LV_ALIGN_TOP_MID, 0, 6);
+
+      s_visionHintLabel = lv_label_create(s_tiles[i]);
+      style_tile_text(s_visionHintLabel);
+      lv_label_set_text(s_visionHintLabel, app_tr(TR_VISION_HINT));
+      lv_obj_align(s_visionHintLabel, LV_ALIGN_TOP_MID, 0, 40);
+
+      s_tileLabels[i] = lv_label_create(s_tiles[i]);
+      lv_label_set_text(s_tileLabels[i], app_tr(tile_str_id(i)));
+      style_tile_text(s_tileLabels[i]);
+      lv_obj_align(s_tileLabels[i], LV_ALIGN_TOP_MID, 0, 58);
+      bind_vision_tile();
     } else if (i == 3) {
       s_settingsIconCanvas = lv_canvas_create(s_tiles[i]);
       lv_canvas_set_buffer(s_settingsIconCanvas, s_settingsIconBuf,
@@ -242,6 +277,7 @@ void ui_home_init(void) {
 
 void ui_home_show(void) {
   bind_weather_tile();
+  bind_vision_tile();
   bind_settings_tile();
   lv_scr_load(s_screenHome);
   lv_obj_invalidate(s_screenHome);
@@ -271,6 +307,7 @@ void ui_home_refresh_locale(void) {
     return;
   }
   refresh_tile_titles();
+  bind_vision_tile();
   bind_settings_tile();
   lv_label_set_text(s_detailTitle, app_tr(TR_DETAIL));
   lv_label_set_text(s_detailBody, app_tr(TR_COMING_SOON));

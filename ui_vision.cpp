@@ -1,6 +1,7 @@
 #include "ui_vision.h"
 
 #include "app_locale.h"
+#include "camera_service.h"
 #include "ui_fonts.h"
 #include "vision_service.h"
 
@@ -75,6 +76,10 @@ void ui_vision_show(void) {
   show_idle();
   lv_scr_load(s_screenVision);
   lv_obj_invalidate(s_screenVision);
+}
+
+void ui_vision_leave(void) {
+  camera_service_pause();
 }
 
 void ui_vision_refresh(void) {

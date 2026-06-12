@@ -17,11 +17,12 @@
 #define METRIC_COL_LEFT    6
 #define METRIC_COL_RIGHT   104
 #define METRIC_ROW_H       20
-#define FORECAST_ICON_Y    54
-#define FORECAST_DAY_Y     76
-#define FORECAST_TEMP_Y    90
-#define FORECAST_DIVIDER_Y 108
-#define METRIC_TOP_Y       114
+#define HEADER_DIVIDER_Y   56
+#define FORECAST_ICON_Y    60
+#define FORECAST_DAY_Y     80
+#define FORECAST_TEMP_Y    94
+#define FORECAST_DIVIDER_Y 112
+#define METRIC_TOP_Y       118
 
 static lv_obj_t *s_screenWeather = nullptr;
 static lv_obj_t *s_mainIconCanvas = nullptr;
@@ -258,7 +259,7 @@ void ui_weather_init(void) {
   style_text_label(s_conditionLabel, UI_FONT_SM);
   lv_obj_set_pos(s_conditionLabel, 46, 40);
 
-  add_divider(s_screenWeather, 52);
+  add_divider(s_screenWeather, HEADER_DIVIDER_Y);
 
   for (int i = 0; i < WEATHER_DAILY_COUNT; i++) {
     s_forecastIcons[i] = lv_canvas_create(s_screenWeather);

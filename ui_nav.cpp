@@ -145,6 +145,7 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
         }
         return false;
       case BTN_ACTION_BACK:
+        ui_vision_leave();
         ui_home_show();
         s_onHome = true;
         if (outRefreshMode != nullptr) {

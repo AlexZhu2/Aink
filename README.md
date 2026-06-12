@@ -30,8 +30,8 @@ Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
 ### Platform
 
 - WiFi captive portal + QR setup; credentials stored in NVS
-- Status bar (hand-drawn 8×16 ASCII on the physical right edge)
-- 2×2 launcher: A = move focus, B = open app, A long = back
+- Status bar: single datetime line, dynamic weather icon/temp, battery (hand-drawn 8×16 ASCII on the physical right edge)
+- 2×2 launcher with tile icons; A = move focus, B = open app, A long = back
 - LVGL 8.3 main UI (200×180) + 1-bit e-paper flush
 - Refresh modes: FAST / NAV / QUALITY / FULL
 - NTP (UTC+8)
@@ -40,10 +40,19 @@ Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
 
 | Tile | Status |
 |------|--------|
-| Weather | Forecast, metrics, AQI, 3-day outlook |
-| **AI Vision** | Camera capture + cloud poetic description (≤40 Chinese chars) |
+| Weather | QWeather forecast, metrics, AQI/UV, 3-day outlook (tomorrow onward) |
+| **AI Vision** | Camera capture + cloud poetic description (≤40 Chinese chars); eye icon on launcher |
 | App 3 | Placeholder |
-| Settings | WiFi, **AI provider/model/API key**, Display, About; EN/ZH |
+| Settings | WiFi, **QWeather key/host**, AI provider/model/API key, Display, About; gear icon on launcher; EN/ZH |
+
+### Weather (QWeather / 和风)
+
+- Register at [console.qweather.com](https://console.qweather.com) — copy **API Key** and **API Host** (project-specific, e.g. `xxx.re.qweatherapi.com`; no `https://` prefix).
+- Configure via captive portal (**天气 API** card) or **Settings → WiFi → Configure Weather**.
+- Flow: IP geolocation (`ip-api.com`, HTTP) → QWeather geo lookup (LocationID) → `/v7/weather/now`, `/airquality/v1/current/{lat}/{lon}`, `/v7/weather/7d` (includes `uvIndex` for today), optional UV indices fallback on your API Host (HTTPS).
+- Auth: **`X-QW-Api-Key` header** (not `key=` in URL). Responses are **gzip-compressed**; firmware decompresses with embedded **`puff.c`** (no system `zlib.h`).
+- Detail page shows **city** (`adm2`), not district. Three-day row shows **tomorrow, day after, and day after that** (today excluded).
+- Refreshes every 30 minutes when WiFi is connected.
 
 ### AI Vision
 
@@ -56,13 +65,7 @@ Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
 - MiMo auth: `Authorization: Bearer <key>` (Token Plan / platform key)
 - Camera pauses during HTTPS to avoid `cam_hal: FB-OVF` (frame buffer overflow warnings)
 
-### Settings → Model
-
-- **Provider**: OpenAI / Gemini / Kimi Platform / MiMo Token Plan
-- **Model**: per-provider preset list
-- **API key**: stored in NVS on device only (portal can save key + auto-restart)
-
-Configure API key via captive portal or Settings. MiMo keys often start with `tp-`; Kimi Platform uses keys from [platform.kimi.ai](https://platform.kimi.ai).
+Configure API key via captive portal or **Settings → Model**. MiMo keys often start with `tp-`; Kimi Platform uses keys from [platform.kimi.ai](https://platform.kimi.ai).
 
 ### i18n
 
@@ -107,7 +110,9 @@ python tools/test_vision_api.py --provider mimo --image path\to\photo.jpg
 
 Providers: `mimo`, `kimi`, `openai`. See `tools/test_vision_api.py --help`.
 
-## Chinese fonts
+## Fonts and icons
+
+### Chinese fonts
 
 Regenerate symbol list and fonts with [LVGL Font Converter](https://lvgl.io/tools/fontconverter) (**LVGL 8.x**):
 
@@ -125,16 +130,22 @@ Converter settings:
 
 Update `ui_fonts.h` / `lv_conf.h` if you rename outputs.
 
+### Weather and launcher icons
+
 ```bash
 python tools/svg_to_weather_icons.py
+python tools/png_to_tile_icons.py
 ```
+
+- Weather icons: rasterize `wi-*.svg` → `weather_icons.h` (16×16).
+- Launcher icons: place **`gear.png`** and **`eye.png`** in the sketch root (local only; gitignored), run `png_to_tile_icons.py` → `settings_icons.h` (32×32 outline bitmaps for Settings and AI Vision tiles).
 
 ## Project layout
 
 ```
 Aink.ino              Boot, WiFi portal, status bar, refresh orchestration
 epaper_canvas.*       Framebuffer, rotation, EPD upload
-ui_home / ui_nav      Launcher and navigation
+ui_home / ui_nav      Launcher (tile icons) and navigation
 ui_weather.*          Weather app
 ui_vision.*           AI Vision UI
 ui_settings.*         Settings app (multi-level menu)
@@ -142,8 +153,11 @@ vision_service.*      Camera → HTTPS vision API → normalized text
 camera_service.*      XIAO Sense camera (240×240 JPEG)
 ai_model_config.*     Provider/model presets and URLs
 app_locale.*          EN/ZH strings
-settings_api.*        NVS (WiFi, language, AI key, provider, model)
-weather_service.*     Open-Meteo + air quality + geo
+settings_api.*        NVS (WiFi, language, AI key, QWeather key/host)
+weather_service.*     QWeather fetch, parse, icon mapping
+weather_gzip.*          Gzip decompress wrapper (uses puff)
+puff.c / puff.h         Embedded deflate decompressor (public domain)
+settings_icons.h      Launcher gear + eye bitmaps (generated)
 aink_3500_12/14.c     LVGL CJK fonts (~3500 chars)
 tools/                Font/icons/API test scripts
 ```
@@ -155,16 +169,21 @@ tools/                Font/icons/API test scripts
 | All Chinese shows □ | LVGL **8.3.x**; remove `.static_bitmap` from font `.c` if present |
 | `[Camera] init failed` / `frame buffer malloc failed` | **PSRAM Enabled**; partition ≥ 3MB; Sense board with camera |
 | `[Vision] HTTP -1` | PSRAM + WiFi; test with `tools/test_vision_api.py` on PC |
+| `[Weather] QWeather key/host not configured` | Settings → WiFi → Configure Weather, or portal **天气 API** card |
+| `[Weather] now HTTP -1` | WiFi; API Host (no `https://`) and Key at [console.qweather.com](https://console.qweather.com) |
+| `[Weather] QWeather code=401/403` | Key invalid or Host does not match project; use console Host, not legacy `devapi.qweather.com` |
+| `[Weather] air request failed` / `air parse failed` | Air Quality uses `/airquality/v1/current/{lat}/{lon}` (not legacy `/v7/air/now`); confirm your QWeather plan includes Air Quality API |
+| `[Weather] gzip …` missing / parse failed | Reflash latest firmware (`puff.c` + `weather_gzip.cpp` in sketch) |
+| `undefined reference to puff` | Clean build (Sketch → Clean All); ensure `puff.c` and `puff.h` are in sketch folder |
 | `provider unsupported` | MiMo unsupported model → use **v2.5** / **v2-omni** |
 | Screen stuck on「分析中」 | Reflash latest firmware (NAV refresh after capture) |
-| `cam_hal: FB-OVF` | Harmless warning if capture works; camera pauses during HTTPS in latest code |
+| `cam_hal: FB-OVF` | Harmless warning if capture works; camera pauses during HTTPS |
 
 ## Notes for contributors
 
 - Do not break status-bar orientation or portal-only horizontal mirror (`epaper_canvas.cpp`).
 - E-paper is 1-bit: LVGL grays are thresholded in flush; avoid large gray fills.
-- Open-Meteo / ip-api are used without API keys; city names may need extra font glyphs for Chinese locales.
-- Do not commit API keys or local test images.
+- Do not commit API keys, local test images, or source PNGs (`gear.png` / `eye.png` are gitignored; commit generated `settings_icons.h` instead).
 
 ## License
 

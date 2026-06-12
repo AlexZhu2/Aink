@@ -9,6 +9,7 @@
 
 void ui_vision_init(void);
 void ui_vision_show(void);
+void ui_vision_leave(void);
 void ui_vision_refresh(void);
 bool ui_vision_is_active(void);
 

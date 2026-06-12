@@ -10,7 +10,7 @@
 bool camera_service_init(void);
 bool camera_service_is_ready(void);
 
-/** Stop sensor/DMA (e.g. during long HTTPS) to avoid cam_hal FB-OVF spam. */
+/** Power down sensor/DMA (during HTTPS or when idle) to avoid heat and FB-OVF. */
 void camera_service_pause(void);
 
 camera_fb_t *camera_service_capture(void);
