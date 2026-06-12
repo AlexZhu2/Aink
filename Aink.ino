@@ -37,6 +37,8 @@ extern "C" {
 #define PREFS_KEY_PASS           "pass"
 #define QR_CODE_BUFFER_SIZE      350
 #define WIFI_RECONNECT_MAX_FAIL  5
+#define DISPLAY_COALESCE_MS      80U
+#define DISPLAY_UPLOAD_GUARD_MS  700U
 
 // XIAO ESP32-S3 板载电池电压经 D0/GPIO1 分压接入 ADC（与 EPD BUSY 同脚）
 #define BATTERY_ADC_GPIO         1
@@ -55,11 +57,18 @@ static bool portalModeActive = false;
 static bool portalWebStarted = false;
 static int wifiReconnectFailures = 0;
 static char portalApSsid[24];
+static bool displayRefreshPending = false;
+static UiRefreshMode pendingDisplayRefreshMode = UI_REFRESH_NONE;
+static uint8_t pendingDisplayRequestCount = 0;
+static unsigned long pendingDisplaySinceMs = 0;
+static unsigned long lastDisplayUploadMs = 0;
 
 static bool syncNetworkTime();
 static void drawStatusBarRegion(UBYTE *image, int batteryPercent, bool wifiConnected,
                                 bool showWeather, WeatherIconKind weatherIcon, int weatherTempC);
 static void refreshMainUiOnDisplay(UiRefreshMode mode);
+static void requestDisplayRefresh(UiRefreshMode mode);
+static void serviceDisplayRefresh(bool force);
 
 static void setEpaperPixel(UBYTE *image, UWORD lx, UWORD ly, bool black) {
   (void)image;
@@ -771,6 +780,7 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
   }
 
   epaper_upload_mode(fullInit, fastEpd);
+  lastDisplayUploadMs = millis();
 
   if (!fullLvgl || mode == UI_REFRESH_NAV) {
     return;
@@ -794,6 +804,89 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
                   weather.valid ? "ok" : "n/a",
                   batteryPercent);
   }
+}
+
+static int refreshModePriority(UiRefreshMode mode) {
+  switch (mode) {
+    case UI_REFRESH_FULL:
+      return 4;
+    case UI_REFRESH_QUALITY:
+      return 3;
+    case UI_REFRESH_NAV:
+      return 2;
+    case UI_REFRESH_FAST:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static UiRefreshMode strongerRefreshMode(UiRefreshMode a, UiRefreshMode b) {
+  return refreshModePriority(b) > refreshModePriority(a) ? b : a;
+}
+
+static const char *refreshModeName(UiRefreshMode mode) {
+  switch (mode) {
+    case UI_REFRESH_FAST:
+      return "FAST";
+    case UI_REFRESH_NAV:
+      return "NAV";
+    case UI_REFRESH_QUALITY:
+      return "QUALITY";
+    case UI_REFRESH_FULL:
+      return "FULL";
+    default:
+      return "NONE";
+  }
+}
+
+static void requestDisplayRefresh(UiRefreshMode mode) {
+  if (mode == UI_REFRESH_NONE) {
+    return;
+  }
+
+  const unsigned long now = millis();
+  if (!displayRefreshPending) {
+    displayRefreshPending = true;
+    pendingDisplayRefreshMode = mode;
+    pendingDisplayRequestCount = 1;
+    pendingDisplaySinceMs = now;
+  } else {
+    pendingDisplayRequestCount++;
+    pendingDisplayRefreshMode = strongerRefreshMode(pendingDisplayRefreshMode, mode);
+    if (pendingDisplayRefreshMode == UI_REFRESH_FAST && pendingDisplayRequestCount > 1) {
+      pendingDisplayRefreshMode = UI_REFRESH_NAV;
+    }
+  }
+}
+
+static void serviceDisplayRefresh(bool force) {
+  if (!displayRefreshPending) {
+    return;
+  }
+
+  unsigned long now = millis();
+  if (!force && now - pendingDisplaySinceMs < DISPLAY_COALESCE_MS) {
+    return;
+  }
+
+  if (lastDisplayUploadMs != 0 && now - lastDisplayUploadMs < DISPLAY_UPLOAD_GUARD_MS) {
+    if (!force) {
+      return;
+    }
+    delay(DISPLAY_UPLOAD_GUARD_MS - (now - lastDisplayUploadMs));
+    now = millis();
+  }
+
+  const UiRefreshMode mode = pendingDisplayRefreshMode;
+  const uint8_t count = pendingDisplayRequestCount;
+  displayRefreshPending = false;
+  pendingDisplayRefreshMode = UI_REFRESH_NONE;
+  pendingDisplayRequestCount = 0;
+
+  Serial.printf("[Display] flush %s (%u request%s)\n",
+                refreshModeName(mode), count, count == 1 ? "" : "s");
+  refreshMainUiOnDisplay(mode);
 }
 
 void setup() {
@@ -825,7 +918,7 @@ void loop() {
   weather_service_update(false);
 
   if (weather_service_consume_fresh_fetch()) {
-    refreshMainUiOnDisplay(UI_REFRESH_QUALITY);
+    requestDisplayRefresh(UI_REFRESH_QUALITY);
   }
 
   btn_input_update();
@@ -836,15 +929,16 @@ void loop() {
   while (btn_input_consume(&btnAction)) {
     UiRefreshMode navMode = UI_REFRESH_NONE;
     if (ui_nav_handle(btnAction, &navMode)) {
-      refreshMainUiOnDisplay(navMode);
+      requestDisplayRefresh(navMode);
       if (ui_vision_consume_capture_request()) {
+        serviceDisplayRefresh(true);
         Serial.println("[Vision] capture pipeline running (blocks up to ~60s)");
         Serial.flush();
         ui_vision_run_capture();
         Serial.println("[Vision] capture pipeline done");
         Serial.flush();
         /* DisplayPart 与「分析中」时一致；QUALITY 的 BaseImage 在此状态下可能不更新可见区域 */
-        refreshMainUiOnDisplay(UI_REFRESH_NAV);
+        requestDisplayRefresh(UI_REFRESH_NAV);
       }
     }
   }
@@ -864,13 +958,13 @@ void loop() {
     if (currentMinute != lastDisplayedMinute ||
         wifiState != lastWifiState ||
         weatherChanged) {
-      refreshMainUiOnDisplay(UI_REFRESH_QUALITY);
+      requestDisplayRefresh(UI_REFRESH_QUALITY);
     }
   } else if (wifiConnected) {
     syncNetworkTime();
   } else {
     if (wifiState != lastWifiState) {
-      refreshMainUiOnDisplay(UI_REFRESH_QUALITY);
+      requestDisplayRefresh(UI_REFRESH_QUALITY);
     }
     if (!tryConnectStoredWiFi(10000)) {
       wifiReconnectFailures++;
@@ -883,9 +977,10 @@ void loop() {
     } else {
       syncNetworkTime();
       weather_service_update(true);
-      refreshMainUiOnDisplay(UI_REFRESH_QUALITY);
+      requestDisplayRefresh(UI_REFRESH_QUALITY);
     }
   }
 
+  serviceDisplayRefresh(false);
   delay(50);
 }
