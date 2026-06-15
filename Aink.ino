@@ -92,6 +92,7 @@ static unsigned long nextWifiAttemptMs = 0;
 static unsigned long ntpSyncStartMs = 0;
 
 static void serviceNetworkStateMachine(bool allowBlockingWork);
+static void serviceStockNameRetry(bool wifiConnected, bool inputIdle);
 static void requestNetworkWeatherFetch(bool force);
 static bool serviceDisplayBootState(void);
 static bool isWifiConnected();
@@ -382,6 +383,18 @@ static void serviceNetworkStateMachine(bool allowBlockingWork) {
     if (stock_service_consume_fresh_fetch()) {
       requestDisplayRefresh(UI_REFRESH_QUALITY);
     }
+  }
+}
+
+static void serviceStockNameRetry(bool wifiConnected, bool inputIdle) {
+  if (!wifiConnected || !inputIdle || portalModeActive) {
+    return;
+  }
+  if (weather_service_is_busy()) {
+    return;
+  }
+  if (stock_service_needs_name_fetch() && stock_service_retry_names()) {
+    requestDisplayRefresh(UI_REFRESH_QUALITY);
   }
 }
 
@@ -783,6 +796,7 @@ static void handlePortalSaveStock() {
   }
 
   settings_api_set_watchlist(watchlist.c_str());
+  stock_service_invalidate_name_cache();
   stock_service_reset();
 
   String storedSsid;
@@ -1331,5 +1345,6 @@ void loop() {
                              !displayRefreshPending &&
                              !epaper_upload_active() &&
                              inputIdle);
+  serviceStockNameRetry(wifiConnected, inputIdle);
   delay(50);
 }

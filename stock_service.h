@@ -24,8 +24,13 @@ typedef struct {
   StockQuote items[STOCK_MAX_ITEMS];
 } StockSnapshot;
 
+void stock_service_invalidate_name_cache(void);
 void stock_service_reset(void);
 void stock_service_update(bool force);
+void stock_service_update_prices(bool force);
+bool stock_service_needs_name_fetch(void);
+bool stock_service_retry_names(void);
+void stock_service_request_name_fetch(void);
 bool stock_service_consume_fresh_fetch(void);
 void stock_service_get_snapshot(StockSnapshot *out);
 
@@ -33,7 +38,7 @@ void stock_service_get_snapshot(StockSnapshot *out);
 const StockQuote *stock_service_get_tile_preview(void);
 
 /**
- * Locale-aware label: ZH uses East Money name; EN uses ticker codes (never CJK names).
+ * Locale-aware label: Chinese name when available; otherwise ticker code.
  */
 void stock_service_format_display_label(const StockQuote *quote, char *out, size_t outLen);
 
@@ -43,7 +48,7 @@ bool stock_service_is_cn_symbol(const char *symbol);
 /** Price with market currency prefix (￥ / $). */
 void stock_service_format_price(const StockQuote *quote, char *out, size_t outLen);
 
-/** Fetch UTF-8 names when switching to Chinese if not cached yet. */
+/** Re-apply NVS name cache after locale change. */
 void stock_service_on_locale_changed(void);
 
 #endif

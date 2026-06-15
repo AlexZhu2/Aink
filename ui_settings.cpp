@@ -493,6 +493,7 @@ SettingsActivateResult ui_settings_activate(void) {
     }
     if (s_focusRow == 2) {
       settings_api_clear_watchlist();
+      stock_service_invalidate_name_cache();
       stock_service_reset();
       update_menu_view();
       return SETTINGS_ACT_NONE;

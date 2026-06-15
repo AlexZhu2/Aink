@@ -114,17 +114,22 @@ Providers: `mimo`, `kimi`, `openai`. See `tools/test_vision_api.py --help`.
 
 ### Chinese fonts
 
-Regenerate symbol list and fonts with [LVGL Font Converter](https://lvgl.io/tools/fontconverter) (**LVGL 8.x**):
+Regenerate symbol list and fonts:
 
 ```bash
 python tools/build_cn_symbols.py
+python tools/build_fonts.py
 ```
+
+`build_fonts.py` needs Node.js (`npx`) and writes `aink_3500_12.c` / `aink_3500_14.c` (Noto Sans SC is cached under `tools/fonts/`, gitignored).
+
+Manual option: [LVGL Font Converter](https://lvgl.io/tools/fontconverter) (**LVGL 8.x**):
 
 Converter settings:
 
 - Bpp: **1**, size **12** / **14**
 - Range: `0x20-0x7F`
-- Symbols: paste from `tools/cn_font_symbols.txt` (3500 common chars + UI strings)
+- Symbols: paste from `tools/cn_font_symbols.txt` (3500 common chars + UI strings + CJK punctuation)
 - Output: `aink_3500_12.c`, `aink_3500_14.c`
 - If the converter adds `.static_bitmap = 0` (LVGL 9), **remove that line** for LVGL 8.3
 

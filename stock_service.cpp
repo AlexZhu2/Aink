@@ -1,9 +1,11 @@
+#include "gbk_utf8.h"
 #include "stock_service.h"
 
 #include "app_locale.h"
 #include "settings_api.h"
 
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <time.h>
 
@@ -17,7 +19,8 @@
 #define STOCK_FETCH_IDLE_MS     (30UL * 60UL * 1000)
 #define STOCK_RETRY_INTERVAL_MS (5UL * 60UL * 1000)
 #define STOCK_HTTP_TIMEOUT_MS   15000
-#define STOCK_NAME_HTTP_MS      12000
+#define STOCK_PREFS_NAMESPACE   "epaper"
+#define STOCK_PREFS_NAMES_KEY   "stk_names"
 
 typedef enum {
   STOCK_MARKET_CN = 0,
@@ -321,127 +324,16 @@ static bool parseSinaQuoteLine(const char *sinaCode, const char *payload, StockM
         (int)((diffX100 * 1000LL + (diffX100 >= 0 ? prevX100 / 2 : -(prevX100 / 2))) / prevX100);
   }
 
-  /* Sina returns GBK names; UTF-8 names come from East Money in enrichNamesFromEastMoney(). */
-  (void)nameField;
+  char nameUtf8[STOCK_NAME_LEN];
+  if (gbk_to_utf8(nameField, nameUtf8, sizeof(nameUtf8)) > 0 && nameUtf8[0] != '\0') {
+    snprintf(outQuote->name, sizeof(outQuote->name), "%s", nameUtf8);
+  } else if (nameField[0] != '\0') {
+    snprintf(outQuote->name, sizeof(outQuote->name), "%s", nameField);
+  }
+
   outQuote->quoteValid = true;
   return true;
 }
-
-static bool buildEastMoneySecids(const StockRequestItem *items, int count, char *out, size_t outLen) {
-  if (items == nullptr || out == nullptr || outLen == 0 || count <= 0) {
-    return false;
-  }
-
-  out[0] = '\0';
-  size_t used = 0;
-  for (int i = 0; i < count; i++) {
-    char secid[20];
-    if (items[i].market == STOCK_MARKET_CN) {
-      const char *marketId = (items[i].userSymbol[0] == 's' && items[i].userSymbol[1] == 'h') ? "1" : "0";
-      snprintf(secid, sizeof(secid), "%s.%s", marketId, items[i].userSymbol + 2);
-    } else {
-      snprintf(secid, sizeof(secid), "105.%s", items[i].userSymbol);
-    }
-
-    if (used > 0) {
-      if (used + 1 >= outLen) {
-        return false;
-      }
-      out[used++] = ',';
-      out[used] = '\0';
-    }
-    const size_t partLen = strlen(secid);
-    if (used + partLen >= outLen) {
-      return false;
-    }
-    memcpy(out + used, secid, partLen);
-    used += partLen;
-    out[used] = '\0';
-  }
-  return used > 0;
-}
-
-static void symbolToMatchCode(const char *symbol, char *out, size_t outLen) {
-  if (symbol == nullptr || out == nullptr || outLen == 0) {
-    return;
-  }
-  if (strncmp(symbol, "sh", 2) == 0 || strncmp(symbol, "sz", 2) == 0) {
-    snprintf(out, outLen, "%s", symbol + 2);
-  } else {
-    snprintf(out, outLen, "%s", symbol);
-  }
-}
-
-static bool httpGetBodySimple(const char *url, const char *tag, String *outBody) {
-  if (url == nullptr || tag == nullptr || outBody == nullptr) {
-    return false;
-  }
-
-  for (int attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) {
-      delay(300);
-      yield();
-    }
-
-    HTTPClient http;
-    http.setConnectTimeout(10000);
-    http.setTimeout(STOCK_NAME_HTTP_MS);
-    http.setReuse(false);
-    if (!http.begin(url)) {
-      Serial.printf("[Stock] %s begin failed (attempt %d)\r\n", tag, attempt + 1);
-      continue;
-    }
-
-    http.addHeader("User-Agent",
-                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-    http.addHeader("Accept", "application/json, text/plain, */*");
-    http.addHeader("Referer", "https://quote.eastmoney.com/");
-
-    const int httpCode = http.GET();
-    if (httpCode != HTTP_CODE_OK) {
-      Serial.printf("[Stock] %s HTTP %d (%s, attempt %d)\r\n", tag, httpCode,
-                    http.errorToString(httpCode).c_str(), attempt + 1);
-      http.end();
-      continue;
-    }
-
-    *outBody = http.getString();
-    http.end();
-    if (outBody->length() > 0) {
-      return true;
-    }
-    Serial.printf("[Stock] %s empty body (attempt %d)\r\n", tag, attempt + 1);
-  }
-
-  return false;
-}
-
-static bool extractJsonFieldAfter(const String &body, int fromIdx, const char *fieldKey, char *out,
-                                  size_t outLen) {
-  if (out == nullptr || outLen == 0) {
-    return false;
-  }
-  out[0] = '\0';
-
-  char search[24];
-  snprintf(search, sizeof(search), "\"%s\":\"", fieldKey);
-  const int keyIdx = body.indexOf(search, fromIdx);
-  if (keyIdx < 0) {
-    return false;
-  }
-
-  const int valStart = keyIdx + (int)strlen(search);
-  const int valEnd = body.indexOf('"', valStart);
-  if (valEnd <= valStart) {
-    return false;
-  }
-
-  const String value = body.substring(valStart, valEnd);
-  snprintf(out, outLen, "%s", value.c_str());
-  return out[0] != '\0';
-}
-
-static bool enrichNamesFromEastMoney(const StockRequestItem *items, int count, StockSnapshot *snap);
 
 static void buildWatchlistKey(const StockRequestItem *items, int count, char *out, size_t outLen) {
   if (items == nullptr || out == nullptr || outLen == 0) {
@@ -527,8 +419,8 @@ static void upsertNameCache(const char *symbol, const char *name) {
   s_nameCacheCount++;
 }
 
-static bool cacheCoversWatchlist(const StockRequestItem *items, int count) {
-  if (!s_nameCacheComplete || items == nullptr || count <= 0) {
+static bool watchlistHasCachedNames(const StockRequestItem *items, int count) {
+  if (items == nullptr || count <= 0) {
     return false;
   }
 
@@ -553,6 +445,125 @@ static void clearNameCache(void) {
   s_nameCacheComplete = false;
 }
 
+static void clearNameCacheNvs(void) {
+  Preferences prefs;
+  prefs.begin(STOCK_PREFS_NAMESPACE, false);
+  prefs.remove(STOCK_PREFS_NAMES_KEY);
+  prefs.end();
+}
+
+static int countDisplayNames(const StockSnapshot *snap) {
+  if (snap == nullptr) {
+    return 0;
+  }
+  int named = 0;
+  for (int i = 0; i < snap->count; i++) {
+    if (quoteHasDisplayName(&snap->items[i])) {
+      named++;
+    }
+  }
+  return named;
+}
+
+static void mergeNamesFromPriorSnapshot(StockSnapshot *snap) {
+  if (snap == nullptr || !s_snapshot.valid) {
+    return;
+  }
+  for (int i = 0; i < snap->count; i++) {
+    StockQuote *quote = &snap->items[i];
+    if (quoteHasDisplayName(quote)) {
+      continue;
+    }
+    for (int j = 0; j < s_snapshot.count; j++) {
+      const StockQuote *prior = &s_snapshot.items[j];
+      if (strcmp(prior->symbol, quote->symbol) != 0 || !quoteHasDisplayName(prior)) {
+        continue;
+      }
+      snprintf(quote->name, sizeof(quote->name), "%s", prior->name);
+      upsertNameCache(quote->symbol, quote->name);
+      break;
+    }
+  }
+}
+
+static void saveNameCacheToNvs(void) {
+  if (s_nameCacheWatchlistKey[0] == '\0' || s_nameCacheCount <= 0) {
+    return;
+  }
+
+  char buf[320];
+  size_t used = snprintf(buf, sizeof(buf), "%s|", s_nameCacheWatchlistKey);
+  for (int i = 0; i < s_nameCacheCount && used + 2 < sizeof(buf); i++) {
+    if (i > 0) {
+      buf[used++] = ',';
+      buf[used] = '\0';
+    }
+    const int written = snprintf(buf + used, sizeof(buf) - used, "%s\t%s",
+                                 s_nameCache[i].symbol, s_nameCache[i].name);
+    if (written <= 0 || (size_t)written >= sizeof(buf) - used) {
+      return;
+    }
+    used += (size_t)written;
+  }
+
+  Preferences prefs;
+  prefs.begin(STOCK_PREFS_NAMESPACE, false);
+  prefs.putString(STOCK_PREFS_NAMES_KEY, buf);
+  prefs.end();
+}
+
+static void loadNameCacheFromNvs(const char *watchlistKey, const StockRequestItem *items, int count) {
+  if (watchlistKey == nullptr || watchlistKey[0] == '\0' || items == nullptr || count <= 0 ||
+      s_nameCacheCount > 0) {
+    return;
+  }
+
+  Preferences prefs;
+  prefs.begin(STOCK_PREFS_NAMESPACE, true);
+  const String stored = prefs.getString(STOCK_PREFS_NAMES_KEY, "");
+  prefs.end();
+  if (stored.length() == 0) {
+    return;
+  }
+
+  const int sep = stored.indexOf('|');
+  if (sep <= 0) {
+    return;
+  }
+
+  const String storedKey = stored.substring(0, sep);
+  if (!storedKey.equals(watchlistKey)) {
+    return;
+  }
+
+  String entries = stored.substring(sep + 1);
+  while (entries.length() > 0) {
+    const int comma = entries.indexOf(',');
+    const String entry = comma >= 0 ? entries.substring(0, comma) : entries;
+    const int tab = entry.indexOf('\t');
+    if (tab > 0) {
+      String symbol = entry.substring(0, tab);
+      String name = entry.substring(tab + 1);
+      symbol.trim();
+      name.trim();
+      if (symbol.length() > 0 && name.length() > 0) {
+        upsertNameCache(symbol.c_str(), name.c_str());
+      }
+    }
+    if (comma < 0) {
+      break;
+    }
+    entries = entries.substring(comma + 1);
+  }
+
+  if (s_nameCacheCount <= 0) {
+    return;
+  }
+
+  snprintf(s_nameCacheWatchlistKey, sizeof(s_nameCacheWatchlistKey), "%s", watchlistKey);
+  s_nameCacheComplete = watchlistHasCachedNames(items, count);
+}
+
 static void syncNameCacheFromSnapshot(const StockRequestItem *items, int count,
                                       const StockSnapshot *snap) {
   if (items == nullptr || snap == nullptr || count <= 0) {
@@ -566,95 +577,42 @@ static void syncNameCacheFromSnapshot(const StockRequestItem *items, int count,
       upsertNameCache(quote->symbol, quote->name);
     }
   }
-  s_nameCacheComplete = cacheCoversWatchlist(items, count);
+  s_nameCacheComplete = watchlistHasCachedNames(items, count);
+  if (s_nameCacheCount > 0) {
+    saveNameCacheToNvs();
+  }
+}
+
+static void applyLocalNames(const StockRequestItem *items, int count, StockSnapshot *snap) {
+  if (items == nullptr || snap == nullptr || count <= 0) {
+    return;
+  }
+
+  char watchlistKey[128];
+  buildWatchlistKey(items, count, watchlistKey, sizeof(watchlistKey));
+  applyNameCache(snap);
+  mergeNamesFromPriorSnapshot(snap);
+  if (watchlistKey[0] != '\0') {
+    loadNameCacheFromNvs(watchlistKey, items, count);
+    applyNameCache(snap);
+    mergeNamesFromPriorSnapshot(snap);
+  }
 }
 
 static void enrichNamesIfNeeded(const StockRequestItem *items, int count, StockSnapshot *snap) {
   if (items == nullptr || snap == nullptr || count <= 0) {
     return;
   }
-  if (app_locale_get() != APP_LANG_ZH) {
-    return;
-  }
 
-  applyNameCache(snap);
+  applyLocalNames(items, count, snap);
+  syncNameCacheFromSnapshot(items, count, snap);
 
-  char watchlistKey[128];
-  buildWatchlistKey(items, count, watchlistKey, sizeof(watchlistKey));
-  if (watchlistKey[0] == '\0') {
-    return;
-  }
-
-  if (cacheCoversWatchlist(items, count)) {
-    Serial.println("[Stock] names from cache");
-    return;
-  }
-
-  const bool watchlistChanged = strcmp(watchlistKey, s_nameCacheWatchlistKey) != 0;
-  if (!watchlistChanged && !s_nameCacheComplete) {
-    Serial.println("[Stock] names fetch skipped (retry when watchlist changes)");
-    return;
-  }
-
-  delay(200);
-  yield();
-
-  if (enrichNamesFromEastMoney(items, count, snap)) {
-    syncNameCacheFromSnapshot(items, count, snap);
-    if (s_nameCacheComplete) {
-      Serial.println("[Stock] names cached");
-    }
-  } else {
-    snprintf(s_nameCacheWatchlistKey, sizeof(s_nameCacheWatchlistKey), "%s", watchlistKey);
-    s_nameCacheComplete = false;
-    applyNameCache(snap);
-  }
-}
-
-static bool enrichNamesFromEastMoney(const StockRequestItem *items, int count, StockSnapshot *snap) {
-  if (items == nullptr || snap == nullptr || count <= 0) {
-    return false;
-  }
-
-  char secids[96];
-  if (!buildEastMoneySecids(items, count, secids, sizeof(secids))) {
-    return false;
-  }
-
-  char url[256];
-  snprintf(url, sizeof(url),
-           "http://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f12,f14&secids=%s",
-           secids);
-
-  String body;
-  if (!httpGetBodySimple(url, "names", &body)) {
-    Serial.println("[Stock] name fetch failed, using symbols");
-    return false;
-  }
-
-  int named = 0;
   for (int i = 0; i < snap->count; i++) {
-    StockQuote *quote = &snap->items[i];
-    char matchCode[STOCK_SYMBOL_LEN];
-    symbolToMatchCode(quote->symbol, matchCode, sizeof(matchCode));
-
-    char searchPat[32];
-    snprintf(searchPat, sizeof(searchPat), "\"f12\":\"%s\"", matchCode);
-    const int pos = body.indexOf(searchPat);
-    if (pos < 0) {
-      continue;
+    const StockQuote *quote = &snap->items[i];
+    if (quoteHasDisplayName(quote)) {
+      Serial.printf("[Stock] %s -> %s\r\n", quote->symbol, quote->name);
     }
-
-    char nameUtf8[STOCK_NAME_LEN];
-    if (!extractJsonFieldAfter(body, pos, "f14", nameUtf8, sizeof(nameUtf8))) {
-      continue;
-    }
-
-    snprintf(quote->name, sizeof(quote->name), "%s", nameUtf8);
-    named++;
-    Serial.printf("[Stock] %s -> %s\r\n", quote->symbol, quote->name);
   }
-  return named > 0;
 }
 
 static bool buildSinaListParam(const StockRequestItem *items, int count, char *out, size_t outLen) {
@@ -802,9 +760,7 @@ static bool fetchStocks(StockSnapshot *outSnap) {
     return false;
   }
 
-  if (app_locale_get() == APP_LANG_ZH) {
-    enrichNamesIfNeeded(items, count, outSnap);
-  }
+  enrichNamesIfNeeded(items, count, outSnap);
 
   for (int i = 0; i < outSnap->count; i++) {
     const StockQuote *q = &outSnap->items[i];
@@ -817,6 +773,11 @@ static bool fetchStocks(StockSnapshot *outSnap) {
                   q->changePctX10 / 10, abs(q->changePctX10 % 10));
   }
   return true;
+}
+
+void stock_service_invalidate_name_cache(void) {
+  clearNameCache();
+  clearNameCacheNvs();
 }
 
 void stock_service_reset(void) {
@@ -928,11 +889,12 @@ void stock_service_format_display_label(const StockQuote *quote, char *out, size
     return;
   }
 
+  if (quote->name[0] != '\0' && strcmp(quote->name, quote->symbol) != 0) {
+    snprintf(out, outLen, "%s", quote->name);
+    return;
+  }
+
   if (app_locale_get() == APP_LANG_ZH) {
-    if (quote->name[0] != '\0' && strcmp(quote->name, quote->symbol) != 0) {
-      snprintf(out, outLen, "%s", quote->name);
-      return;
-    }
     snprintf(out, outLen, "%s", quote->symbol);
     return;
   }
@@ -947,7 +909,7 @@ void stock_service_format_display_label(const StockQuote *quote, char *out, size
 }
 
 void stock_service_on_locale_changed(void) {
-  if (app_locale_get() != APP_LANG_ZH || !s_snapshot.valid || s_snapshot.count <= 0) {
+  if (!s_snapshot.valid || s_snapshot.count <= 0) {
     return;
   }
 
@@ -991,4 +953,46 @@ void stock_service_update(bool force) {
     s_freshFetchPending = true;
     Serial.println("[Stock] fetch complete");
   }
+}
+
+void stock_service_update_prices(bool force) {
+  stock_service_update(force);
+}
+
+bool stock_service_needs_name_fetch(void) {
+  if (!s_snapshot.valid) {
+    return false;
+  }
+
+  StockRequestItem items[STOCK_MAX_ITEMS];
+  const int count = parseWatchlist(items, STOCK_MAX_ITEMS);
+  if (count <= 0) {
+    return false;
+  }
+
+  return countDisplayNames(&s_snapshot) < count;
+}
+
+bool stock_service_retry_names(void) {
+  if (WiFi.status() != WL_CONNECTED || !s_snapshot.valid) {
+    return false;
+  }
+
+  StockRequestItem items[STOCK_MAX_ITEMS];
+  const int count = parseWatchlist(items, STOCK_MAX_ITEMS);
+  if (count <= 0) {
+    return false;
+  }
+
+  const int before = countDisplayNames(&s_snapshot);
+  enrichNamesIfNeeded(items, count, &s_snapshot);
+  if (countDisplayNames(&s_snapshot) <= before) {
+    return false;
+  }
+
+  s_freshFetchPending = true;
+  return true;
+}
+
+void stock_service_request_name_fetch(void) {
 }
