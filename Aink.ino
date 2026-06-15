@@ -1306,15 +1306,18 @@ void loop() {
       requestDisplayRefresh(navMode);
       if (ui_vision_consume_capture_request()) {
         serviceDisplayRefresh(true);
-        Serial.println("[Vision] capture pipeline running (blocks up to ~60s)");
+        Serial.println("[Vision] capture pipeline starting (async)");
         Serial.flush();
-        ui_vision_run_capture();
-        Serial.println("[Vision] capture pipeline done");
-        Serial.flush();
-        /* DisplayPart 与「分析中」时一致；QUALITY 的 BaseImage 在此状态下可能不更新可见区域 */
-        requestDisplayRefresh(UI_REFRESH_NAV);
+        if (!ui_vision_run_capture()) {
+          requestDisplayRefresh(UI_REFRESH_NAV);
+        }
       }
     }
+  }
+
+  UiRefreshMode visionMode = UI_REFRESH_NONE;
+  if (ui_vision_service(&visionMode)) {
+    requestDisplayRefresh(visionMode);
   }
 
   const bool wifiConnected = isWifiConnected();
@@ -1346,10 +1349,12 @@ void loop() {
   serviceDisplayRefresh(false);
   const bool inputIdle = lastUserInputMs == 0 ||
                          (millis() - lastUserInputMs) >= NETWORK_IDLE_AFTER_INPUT_MS;
+  const bool visionIdle = !ui_vision_is_busy();
   serviceNetworkStateMachine(displayBootState == DISPLAY_BOOT_READY &&
                              !displayRefreshPending &&
                              !epaper_upload_active() &&
-                             inputIdle);
-  serviceStockNameRetry(wifiConnected, inputIdle);
+                             inputIdle &&
+                             visionIdle);
+  serviceStockNameRetry(wifiConnected, inputIdle && visionIdle);
   delay(50);
 }
