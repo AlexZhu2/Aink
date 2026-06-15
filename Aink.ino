@@ -32,13 +32,18 @@ extern "C" {
 #define STATUS_BAR_HEIGHT        20
 
 // WiFi 配网
-#define WIFI_CONNECT_TIMEOUT_MS  20000
 #define WIFI_PORTAL_DNS_PORT     53
 #define PREFS_NAMESPACE          "epaper"
 #define PREFS_KEY_SSID           "ssid"
 #define PREFS_KEY_PASS           "pass"
 #define QR_CODE_BUFFER_SIZE      350
 #define WIFI_RECONNECT_MAX_FAIL  5
+#define WIFI_CONNECT_TIMEOUT_MS  10000UL
+#define WIFI_RECONNECT_BACKOFF_MS 2000UL
+#define NTP_SYNC_TIMEOUT_MS      15000UL
+#define NETWORK_IDLE_AFTER_INPUT_MS 600UL
+#define DISPLAY_COALESCE_MS      80U
+#define DISPLAY_UPLOAD_GUARD_MS  700U
 
 // XIAO ESP32-S3 板载电池电压经 D0/GPIO1 分压接入 ADC（与 EPD BUSY 同脚）
 #define BATTERY_ADC_GPIO         1
@@ -57,11 +62,45 @@ static bool portalModeActive = false;
 static bool portalWebStarted = false;
 static int wifiReconnectFailures = 0;
 static char portalApSsid[24];
+static bool displayRefreshPending = false;
+static UiRefreshMode pendingDisplayRefreshMode = UI_REFRESH_NONE;
+static uint8_t pendingDisplayRequestCount = 0;
+static unsigned long pendingDisplaySinceMs = 0;
+static unsigned long lastDisplayUploadMs = 0;
 
-static bool syncNetworkTime();
+enum NetworkState {
+  NET_IDLE = 0,
+  NET_WIFI_WAIT,
+  NET_NTP_WAIT,
+  NET_WEATHER_FETCH,
+};
+
+enum DisplayBootState {
+  DISPLAY_BOOT_READY = 0,
+  DISPLAY_BOOT_CLEAR_WAIT,
+};
+
+static NetworkState networkState = NET_IDLE;
+static DisplayBootState displayBootState = DISPLAY_BOOT_READY;
+static bool networkTimeSyncRequested = false;
+static bool networkWeatherForcePending = false;
+static bool networkWeatherServicePending = false;
+static bool networkStockForcePending = false;
+static unsigned long lastUserInputMs = 0;
+static unsigned long wifiConnectStartMs = 0;
+static unsigned long nextWifiAttemptMs = 0;
+static unsigned long ntpSyncStartMs = 0;
+
+static void serviceNetworkStateMachine(bool allowBlockingWork);
+static void requestNetworkWeatherFetch(bool force);
+static bool serviceDisplayBootState(void);
+static bool isWifiConnected();
+static void enterPortalMode();
 static void drawStatusBarRegion(UBYTE *image, int batteryPercent, bool wifiConnected,
                                 bool showWeather, WeatherIconKind weatherIcon, int weatherTempC);
 static void refreshMainUiOnDisplay(UiRefreshMode mode);
+static void requestDisplayRefresh(UiRefreshMode mode);
+static void serviceDisplayRefresh(bool force);
 
 static void setEpaperPixel(UBYTE *image, UWORD lx, UWORD ly, bool black) {
   (void)image;
@@ -172,6 +211,12 @@ static bool loadStoredWiFiCredentials(String &outSsid, String &outPass) {
   return outSsid.length() > 0;
 }
 
+static bool hasStoredWiFiCredentials() {
+  String storedSsid;
+  String storedPass;
+  return loadStoredWiFiCredentials(storedSsid, storedPass);
+}
+
 static void saveStoredWiFiCredentials(const String &ssid, const String &pass) {
   devicePrefs.begin(PREFS_NAMESPACE, false);
   devicePrefs.putString(PREFS_KEY_SSID, ssid);
@@ -179,7 +224,7 @@ static void saveStoredWiFiCredentials(const String &ssid, const String &pass) {
   devicePrefs.end();
 }
 
-static bool tryConnectStoredWiFi(unsigned long timeoutMs) {
+static bool startStoredWiFiConnect() {
   String storedSsid;
   String storedPass;
   if (!loadStoredWiFiCredentials(storedSsid, storedPass)) {
@@ -187,26 +232,157 @@ static bool tryConnectStoredWiFi(unsigned long timeoutMs) {
     return false;
   }
 
-  Serial.printf("[WiFi] Connecting to %s...\n", storedSsid.c_str());
+  Serial.printf("[WiFi] Connecting to %s (async)...\n", storedSsid.c_str());
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  delay(100);
   WiFi.begin(storedSsid.c_str(), storedPass.c_str());
+  wifiConnectStartMs = millis();
+  networkState = NET_WIFI_WAIT;
+  return true;
+}
 
-  const unsigned long startMs = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    if (millis() - startMs >= timeoutMs) {
-      Serial.println(" TIMEOUT");
-      return false;
-    }
-    delay(500);
+static void beginNetworkTimeSync() {
+  Serial.println("[NTP] sync requested");
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC,
+             "ntp.aliyun.com", "pool.ntp.org", "cn.ntp.org.cn");
+  ntpSyncStartMs = millis();
+  networkTimeSyncRequested = true;
+  networkState = NET_NTP_WAIT;
+}
+
+static bool pollNetworkTimeSync() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 0)) {
+    Serial.printf("[NTP] synced: %04d-%02d-%02d %02d:%02d:%02d\n",
+                  timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    networkTimeSyncRequested = false;
+    return true;
   }
 
-  Serial.println();
-  Serial.print("[WiFi] IP: ");
-  Serial.println(WiFi.localIP());
-  wifiReconnectFailures = 0;
-  return true;
+  if (millis() - ntpSyncStartMs >= NTP_SYNC_TIMEOUT_MS) {
+    Serial.println("[NTP] sync timeout");
+    networkTimeSyncRequested = false;
+    return true;
+  }
+  return false;
+}
+
+static void requestNetworkWeatherFetch(bool force) {
+  networkWeatherServicePending = true;
+  if (force) {
+    networkWeatherForcePending = true;
+  }
+}
+
+static void serviceNetworkStateMachine(bool allowBlockingWork) {
+  if (portalModeActive) {
+    return;
+  }
+
+  const unsigned long now = millis();
+  const bool wifiConnected = isWifiConnected();
+
+  switch (networkState) {
+    case NET_WIFI_WAIT:
+      if (wifiConnected) {
+        Serial.print("[WiFi] IP: ");
+        Serial.println(WiFi.localIP());
+        wifiReconnectFailures = 0;
+        networkState = NET_IDLE;
+        beginNetworkTimeSync();
+        requestNetworkWeatherFetch(true);
+        networkStockForcePending = true;
+        requestDisplayRefresh(UI_REFRESH_QUALITY);
+      } else if (now - wifiConnectStartMs >= WIFI_CONNECT_TIMEOUT_MS) {
+        WiFi.disconnect();
+        wifiReconnectFailures++;
+        nextWifiAttemptMs = now + WIFI_RECONNECT_BACKOFF_MS;
+        networkState = NET_IDLE;
+        Serial.printf("[WiFi] Reconnect failed (%d/%d)\n",
+                      wifiReconnectFailures, WIFI_RECONNECT_MAX_FAIL);
+        if (wifiReconnectFailures >= WIFI_RECONNECT_MAX_FAIL) {
+          Serial.println("[WiFi] Entering config portal after reconnect failures");
+          enterPortalMode();
+        }
+      }
+      return;
+
+    case NET_NTP_WAIT:
+      if (!wifiConnected) {
+        networkTimeSyncRequested = false;
+        networkState = NET_IDLE;
+        return;
+      }
+      if (pollNetworkTimeSync()) {
+        networkState = NET_IDLE;
+        requestDisplayRefresh(UI_REFRESH_QUALITY);
+      }
+      return;
+
+    case NET_WEATHER_FETCH:
+      if (!wifiConnected) {
+        networkWeatherServicePending = false;
+        networkWeatherForcePending = false;
+        networkState = NET_IDLE;
+        return;
+      }
+      if (!allowBlockingWork) {
+        return;
+      }
+      if (!weather_service_is_busy()) {
+        weather_service_request_update(networkWeatherForcePending);
+      }
+      networkWeatherForcePending = false;
+      networkWeatherServicePending = false;
+      networkState = NET_IDLE;
+      return;
+
+    case NET_IDLE:
+    default:
+      break;
+  }
+
+  if (!wifiConnected) {
+    if (hasStoredWiFiCredentials() && now >= nextWifiAttemptMs) {
+      if (!startStoredWiFiConnect()) {
+        nextWifiAttemptMs = now + WIFI_RECONNECT_BACKOFF_MS;
+      }
+    }
+    return;
+  }
+
+  if (networkTimeSyncRequested) {
+    beginNetworkTimeSync();
+    return;
+  }
+
+  if (networkWeatherServicePending) {
+    networkState = NET_WEATHER_FETCH;
+    serviceNetworkStateMachine(allowBlockingWork);
+    return;
+  }
+
+  if (allowBlockingWork) {
+    if (!weather_service_is_busy()) {
+      weather_service_request_update(false);
+    }
+  } else {
+    requestNetworkWeatherFetch(false);
+  }
+
+  if (weather_service_consume_fresh_fetch()) {
+    requestDisplayRefresh(UI_REFRESH_QUALITY);
+  }
+
+  if (allowBlockingWork && !weather_service_is_busy()) {
+    const bool stockForce = networkStockForcePending;
+    networkStockForcePending = false;
+    stock_service_update(stockForce);
+    if (stock_service_consume_fresh_fetch()) {
+      requestDisplayRefresh(UI_REFRESH_QUALITY);
+    }
+  }
 }
 
 static bool drawQrCodeScaled(UBYTE *image, const char *text, UWORD areaX, UWORD areaY, UWORD areaSize) {
@@ -659,27 +835,53 @@ static void enterPortalMode() {
   setupPortalWebRoutes();
 
   portalModeActive = true;
+  displayBootState = DISPLAY_BOOT_READY;
   Serial.printf("[Portal] AP: %s  open  IP: %s\n",
                 portalApSsid, WiFi.softAPIP().toString().c_str());
   showSetupScreenOnEpaper();
 }
 
+static bool serviceDisplayBootState(void) {
+  if (displayBootState == DISPLAY_BOOT_READY) {
+    return true;
+  }
+
+  if (displayBootState == DISPLAY_BOOT_CLEAR_WAIT) {
+    if (EPD_1IN54_V2_PollBusyWait()) {
+      return false;
+    }
+    EPD_1IN54_V2_Enter_Partial();
+    epaper_mark_partial_ready();
+    displayBootState = DISPLAY_BOOT_READY;
+    Serial.println("[EPD] partial ready after async white clear");
+    return true;
+  }
+
+  return false;
+}
+
 static void startNormalOperation() {
   portalModeActive = false;
   epaper_set_portal_mirror(false);
-  if (WiFi.status() == WL_CONNECTED) {
-    syncNetworkTime();
-  }
 
-  Serial.println("[EPD] full clear (~25s)...");
+  Serial.println("[EPD] full clear (~25s, async)...");
   EPD_1IN54_V2_Init();
-  EPD_1IN54_V2_Clear();
-  Serial.println("[EPD] clear done");
+  EPD_1IN54_V2_ClearAsync();
+  displayBootState = DISPLAY_BOOT_CLEAR_WAIT;
 
   lastDisplayedMinute = -1;
   lastWifiState = -1;
   lastWeatherIcon = -1;
   lastWeatherTemp = -999;
+  networkState = NET_IDLE;
+  networkTimeSyncRequested = true;
+  networkWeatherForcePending = false;
+  networkWeatherServicePending = false;
+  networkStockForcePending = false;
+  lastUserInputMs = 0;
+  wifiConnectStartMs = 0;
+  nextWifiAttemptMs = 0;
+  ntpSyncStartMs = 0;
   weather_service_reset();
   stock_service_reset();
 
@@ -694,7 +896,7 @@ static void startNormalOperation() {
   ui_nav_init();
   ui_lvgl_prepare();
 
-  refreshMainUiOnDisplay(UI_REFRESH_FULL);
+  requestDisplayRefresh(UI_REFRESH_NAV);
 }
 
 static void drawWifiIcon(UBYTE *image, UWORD ox, UWORD oy, bool connected) {
@@ -809,24 +1011,6 @@ static int readBatteryPercent() {
   return (int)(pct + 0.5f);
 }
 
-static bool syncNetworkTime() {
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC,
-             "ntp.aliyun.com", "pool.ntp.org", "cn.ntp.org.cn");
-
-  struct tm timeinfo;
-  for (int i = 0; i < 30; i++) {
-    if (getLocalTime(&timeinfo)) {
-      Serial.printf("[NTP] synced: %04d-%02d-%02d %02d:%02d:%02d\n",
-                    timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                    timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-      return true;
-    }
-    delay(500);
-  }
-  Serial.println("[NTP] sync failed");
-  return false;
-}
-
 static const char* weekdayShort(int wday) {
   static const char* names[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
   if (wday < 0 || wday > 6) return "---";
@@ -868,7 +1052,7 @@ static void drawStatusBarRegion(UBYTE *image, int batteryPercent, bool wifiConne
   drawWifiIcon(image, 2, barY + 4, wifiConnected);
 
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
+  if (!getLocalTime(&timeinfo, 0)) {
     drawText(image, "NO TIME", dateX, barY);
     drawHorizontalLine(image, barLineY);
     return;
@@ -943,14 +1127,19 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
                         weather.valid, weather.icon, weather.tempC);
   }
 
-  epaper_upload_mode(fullInit, fastEpd);
+  if (!epaper_upload_mode_async(fullInit, fastEpd)) {
+    Serial.println("[Display] upload skipped: EPD busy");
+    requestDisplayRefresh(mode);
+    return;
+  }
+  lastDisplayUploadMs = millis();
 
   if (!fullLvgl || mode == UI_REFRESH_NAV) {
     return;
   }
 
   struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
+  if (getLocalTime(&timeinfo, 0)) {
     lastDisplayedMinute = timeinfo.tm_hour * 60 + timeinfo.tm_min;
     lastWifiState = wifiState;
     WeatherSnapshot weather = {};
@@ -969,6 +1158,96 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
   }
 }
 
+static int refreshModePriority(UiRefreshMode mode) {
+  switch (mode) {
+    case UI_REFRESH_FULL:
+      return 4;
+    case UI_REFRESH_QUALITY:
+      return 3;
+    case UI_REFRESH_NAV:
+      return 2;
+    case UI_REFRESH_FAST:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static UiRefreshMode strongerRefreshMode(UiRefreshMode a, UiRefreshMode b) {
+  return refreshModePriority(b) > refreshModePriority(a) ? b : a;
+}
+
+static const char *refreshModeName(UiRefreshMode mode) {
+  switch (mode) {
+    case UI_REFRESH_FAST:
+      return "FAST";
+    case UI_REFRESH_NAV:
+      return "NAV";
+    case UI_REFRESH_QUALITY:
+      return "QUALITY";
+    case UI_REFRESH_FULL:
+      return "FULL";
+    default:
+      return "NONE";
+  }
+}
+
+static void requestDisplayRefresh(UiRefreshMode mode) {
+  if (mode == UI_REFRESH_NONE) {
+    return;
+  }
+
+  const unsigned long now = millis();
+  if (!displayRefreshPending) {
+    displayRefreshPending = true;
+    pendingDisplayRefreshMode = mode;
+    pendingDisplayRequestCount = 1;
+    pendingDisplaySinceMs = now;
+  } else {
+    pendingDisplayRequestCount++;
+    pendingDisplayRefreshMode = strongerRefreshMode(pendingDisplayRefreshMode, mode);
+    if (pendingDisplayRefreshMode == UI_REFRESH_FAST && pendingDisplayRequestCount > 1) {
+      pendingDisplayRefreshMode = UI_REFRESH_NAV;
+    }
+  }
+}
+
+static void serviceDisplayRefresh(bool force) {
+  if (!serviceDisplayBootState()) {
+    return;
+  }
+
+  if (epaper_upload_active()) {
+    (void)epaper_poll_upload();
+    return;
+  }
+
+  if (!displayRefreshPending) {
+    return;
+  }
+
+  unsigned long now = millis();
+  if (!force && now - pendingDisplaySinceMs < DISPLAY_COALESCE_MS) {
+    return;
+  }
+
+  if (lastDisplayUploadMs != 0 && now - lastDisplayUploadMs < DISPLAY_UPLOAD_GUARD_MS) {
+    if (!force) {
+      return;
+    }
+  }
+
+  const UiRefreshMode mode = pendingDisplayRefreshMode;
+  const uint8_t count = pendingDisplayRequestCount;
+  displayRefreshPending = false;
+  pendingDisplayRefreshMode = UI_REFRESH_NONE;
+  pendingDisplayRequestCount = 0;
+
+  Serial.printf("[Display] flush %s (%u request%s)\n",
+                refreshModeName(mode), count, count == 1 ? "" : "s");
+  refreshMainUiOnDisplay(mode);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -979,10 +1258,11 @@ void setup() {
   if (settings_api_consume_force_portal_boot()) {
     Serial.println("[WiFi] Entering config portal (settings request)");
     enterPortalMode();
-  } else if (tryConnectStoredWiFi(WIFI_CONNECT_TIMEOUT_MS)) {
+  } else if (hasStoredWiFiCredentials()) {
+    Serial.println("[WiFi] Stored credentials found; showing UI before network bootstrap");
     startNormalOperation();
   } else {
-    Serial.println("[WiFi] Entering config portal");
+    Serial.println("[WiFi] No stored credentials; entering config portal");
     enterPortalMode();
   }
 }
@@ -995,33 +1275,25 @@ void loop() {
     return;
   }
 
-  weather_service_update(false);
-  stock_service_update(false);
-
-  if (weather_service_consume_fresh_fetch()) {
-    refreshMainUiOnDisplay(UI_REFRESH_QUALITY);
-  }
-  if (stock_service_consume_fresh_fetch()) {
-    refreshMainUiOnDisplay(UI_REFRESH_QUALITY);
-  }
-
   btn_input_update();
   btn_input_serial_poll();
   ui_lvgl_tick();
 
   BtnAction btnAction = BTN_ACTION_NONE;
   while (btn_input_consume(&btnAction)) {
+    lastUserInputMs = millis();
     UiRefreshMode navMode = UI_REFRESH_NONE;
     if (ui_nav_handle(btnAction, &navMode)) {
-      refreshMainUiOnDisplay(navMode);
+      requestDisplayRefresh(navMode);
       if (ui_vision_consume_capture_request()) {
+        serviceDisplayRefresh(true);
         Serial.println("[Vision] capture pipeline running (blocks up to ~60s)");
         Serial.flush();
         ui_vision_run_capture();
         Serial.println("[Vision] capture pipeline done");
         Serial.flush();
         /* DisplayPart 与「分析中」时一致；QUALITY 的 BaseImage 在此状态下可能不更新可见区域 */
-        refreshMainUiOnDisplay(UI_REFRESH_NAV);
+        requestDisplayRefresh(UI_REFRESH_NAV);
       }
     }
   }
@@ -1034,36 +1306,30 @@ void loop() {
   const int weatherTempState = weatherSnap.valid ? weatherSnap.tempC : -999;
 
   struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
+  if (getLocalTime(&timeinfo, 0)) {
     const int currentMinute = timeinfo.tm_hour * 60 + timeinfo.tm_min;
     const bool weatherChanged =
         weatherIconState != lastWeatherIcon || weatherTempState != lastWeatherTemp;
     if (currentMinute != lastDisplayedMinute ||
         wifiState != lastWifiState ||
         weatherChanged) {
-      refreshMainUiOnDisplay(UI_REFRESH_QUALITY);
+      requestDisplayRefresh(UI_REFRESH_QUALITY);
     }
-  } else if (wifiConnected) {
-    syncNetworkTime();
   } else {
-    if (wifiState != lastWifiState) {
-      refreshMainUiOnDisplay(UI_REFRESH_QUALITY);
+    if (wifiConnected) {
+      networkTimeSyncRequested = true;
     }
-    if (!tryConnectStoredWiFi(10000)) {
-      wifiReconnectFailures++;
-      Serial.printf("[WiFi] Reconnect failed (%d/%d)\n",
-                    wifiReconnectFailures, WIFI_RECONNECT_MAX_FAIL);
-      if (wifiReconnectFailures >= WIFI_RECONNECT_MAX_FAIL) {
-        Serial.println("[WiFi] Restarting into config portal");
-        ESP.restart();
-      }
-    } else {
-      syncNetworkTime();
-      weather_service_update(true);
-      stock_service_update(true);
-      refreshMainUiOnDisplay(UI_REFRESH_QUALITY);
+    if (wifiState != lastWifiState) {
+      requestDisplayRefresh(UI_REFRESH_QUALITY);
     }
   }
 
+  serviceDisplayRefresh(false);
+  const bool inputIdle = lastUserInputMs == 0 ||
+                         (millis() - lastUserInputMs) >= NETWORK_IDLE_AFTER_INPUT_MS;
+  serviceNetworkStateMachine(displayBootState == DISPLAY_BOOT_READY &&
+                             !displayRefreshPending &&
+                             !epaper_upload_active() &&
+                             inputIdle);
   delay(50);
 }

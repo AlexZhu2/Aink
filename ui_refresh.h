@@ -7,7 +7,7 @@ enum UiRefreshMode {
   UI_REFRESH_FAST,
   /** 换页（进/退详情）：整帧 LVGL + DisplayPart（较快） */
   UI_REFRESH_NAV,
-  /** 分钟 / 天气变化：整帧 + DisplayPartBaseImage（最清晰，较慢） */
+  /** 分钟 / 天气变化：整帧 LVGL + 同步基准帧的 DisplayPart */
   UI_REFRESH_QUALITY,
   /** 启动：Init + BaseImage + Init_Partial */
   UI_REFRESH_FULL,

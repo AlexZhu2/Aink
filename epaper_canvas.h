@@ -14,7 +14,11 @@ void epaper_set_pixel(UWORD lx, UWORD ly, bool black);
 void epaper_clear_white(void);
 void epaper_clear_main_area(void);
 bool epaper_is_partial_ready(void);
+void epaper_mark_partial_ready(void);
 void epaper_upload(bool fullRefresh);
 void epaper_upload_mode(bool fullInit, bool fastPartial);
+bool epaper_upload_mode_async(bool fullInit, bool fastPartial);
+bool epaper_poll_upload(void);
+bool epaper_upload_active(void);
 
 #endif
