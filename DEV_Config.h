@@ -24,6 +24,16 @@
 #define BTN_A_PIN  43
 #define BTN_B_PIN  44
 
+// 按键注册反馈灯：XIAO ESP32S3 Sense 的板载/相机 LED 默认在 GPIO21。
+// 如移植到无此 LED 的硬件，可在编译参数中设为 -1 禁用。
+#ifndef KEY_INDICATOR_LED_PIN
+#define KEY_INDICATOR_LED_PIN 21
+#endif
+
+#ifndef KEY_INDICATOR_LED_ACTIVE_HIGH
+#define KEY_INDICATOR_LED_ACTIVE_HIGH 0
+#endif
+
 #define GPIO_PIN_SET   1
 #define GPIO_PIN_RESET 0
 

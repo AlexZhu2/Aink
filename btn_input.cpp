@@ -12,6 +12,7 @@
 #define BTN_LONG_MS       700U
 #define BTN_EDGE_QUEUE_SIZE    32U
 #define BTN_ACTION_QUEUE_SIZE  16U
+#define KEY_INDICATOR_FLASH_MS 40U
 
 struct BtnEdgeEvent {
   uint8_t id;
@@ -37,6 +38,10 @@ static volatile uint8_t s_edgeTail = 0;
 static BtnAction s_actionQueue[BTN_ACTION_QUEUE_SIZE];
 static uint8_t s_actionHead = 0;
 static uint8_t s_actionTail = 0;
+#if KEY_INDICATOR_LED_PIN >= 0
+static bool s_indicatorActive = false;
+static uint32_t s_indicatorOnAtMs = 0;
+#endif
 
 static void print_serial_help(void) {
   Serial.println("[BtnSim] Serial keys (115200, line ending Any):");
@@ -101,6 +106,38 @@ static bool elapsedMs(uint32_t now, uint32_t since, uint32_t interval) {
   return (uint32_t)(now - since) >= interval;
 }
 
+#if KEY_INDICATOR_LED_PIN >= 0
+static void setKeyIndicator(bool on) {
+  const int activeLevel = KEY_INDICATOR_LED_ACTIVE_HIGH ? HIGH : LOW;
+  const uint32_t activeDuty = KEY_INDICATOR_LED_ACTIVE_HIGH ? 255U : 0U;
+  const uint32_t inactiveDuty = KEY_INDICATOR_LED_ACTIVE_HIGH ? 0U : 255U;
+  if (!ledcWrite(KEY_INDICATOR_LED_PIN, on ? activeDuty : inactiveDuty)) {
+    digitalWrite(KEY_INDICATOR_LED_PIN, on ? activeLevel : !activeLevel);
+  }
+}
+
+static void flashKeyIndicator(uint32_t now) {
+  setKeyIndicator(true);
+  s_indicatorActive = true;
+  s_indicatorOnAtMs = now;
+}
+
+static void serviceKeyIndicator(uint32_t now) {
+  if (s_indicatorActive && elapsedMs(now, s_indicatorOnAtMs, KEY_INDICATOR_FLASH_MS)) {
+    setKeyIndicator(false);
+    s_indicatorActive = false;
+  }
+}
+#else
+static void flashKeyIndicator(uint32_t now) {
+  (void)now;
+}
+
+static void serviceKeyIndicator(uint32_t now) {
+  (void)now;
+}
+#endif
+
 static BtnAction actionFor(BtnId id, uint8_t clickCount, bool isLong) {
   if (isLong) {
     if (id == BTN_ID_A) {
@@ -149,6 +186,7 @@ static void serviceButton(ButtonTracker *btn, BtnId id, uint32_t now) {
     if (btn->stableDown) {
       btn->pressStartMs = stableAt;
       btn->longFired = false;
+      flashKeyIndicator(now);
     } else {
       if (btn->longFired) {
         btn->clickCount = 0;
@@ -259,6 +297,12 @@ void btn_input_init(void) {
 
   pinMode(BTN_A_PIN, INPUT_PULLUP);
   pinMode(BTN_B_PIN, INPUT_PULLUP);
+#if KEY_INDICATOR_LED_PIN >= 0
+  pinMode(KEY_INDICATOR_LED_PIN, OUTPUT);
+  setKeyIndicator(false);
+  s_indicatorActive = false;
+  s_indicatorOnAtMs = 0;
+#endif
 
   noInterrupts();
   s_edgeHead = 0;
@@ -281,11 +325,13 @@ void btn_input_init(void) {
 }
 
 void btn_input_update(void) {
+  const uint32_t now = btn_now_ms();
   BtnEdgeEvent event;
   while (popEdgeEvent(&event)) {
     applyEdgeEvent(&event);
   }
-  serviceButtons(btn_now_ms());
+  serviceButtons(now);
+  serviceKeyIndicator(now);
 }
 
 void btn_input_serial_poll(void) {
