@@ -1308,9 +1308,8 @@ void loop() {
         serviceDisplayRefresh(true);
         Serial.println("[Vision] capture pipeline starting (async)");
         Serial.flush();
-        if (!ui_vision_run_capture()) {
-          requestDisplayRefresh(UI_REFRESH_NAV);
-        }
+        (void)ui_vision_run_capture();
+        requestDisplayRefresh(UI_REFRESH_NAV);
       }
     }
   }

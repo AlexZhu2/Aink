@@ -8,6 +8,7 @@
 
 #include <Arduino.h>
 #include <esp32-hal-ledc.h>
+#include <string.h>
 
 static bool s_ready = false;
 
@@ -177,5 +178,54 @@ bool camera_service_frame_to_rgb888(const camera_fb_t *fb, uint8_t **outRgb, siz
 
   *outRgb = rgb;
   *outSize = rgbSize;
+  return true;
+}
+
+bool camera_service_frame_to_mono_preview100(const camera_fb_t *fb, uint8_t *outBits, size_t outBitsLen) {
+  if (fb == nullptr || outBits == nullptr || outBitsLen < CAMERA_PREVIEW_BYTES) {
+    return false;
+  }
+  if (fb->width == 0 || fb->height == 0) {
+    return false;
+  }
+
+  uint8_t *rgb = nullptr;
+  size_t rgbSize = 0;
+  if (!camera_service_frame_to_rgb888(fb, &rgb, &rgbSize)) {
+    return false;
+  }
+
+  memset(outBits, 0xFF, CAMERA_PREVIEW_BYTES);
+
+  static const uint8_t kBayer4[4][4] = {
+      {0, 8, 2, 10},
+      {12, 4, 14, 6},
+      {3, 11, 1, 9},
+      {15, 7, 13, 5},
+  };
+
+  for (int y = 0; y < CAMERA_PREVIEW_HEIGHT; y++) {
+    const int srcY = (y * (int)fb->height) / CAMERA_PREVIEW_HEIGHT;
+    for (int x = 0; x < CAMERA_PREVIEW_WIDTH; x++) {
+      const int srcX = (x * (int)fb->width) / CAMERA_PREVIEW_WIDTH;
+      const size_t srcIndex = ((size_t)srcY * fb->width + srcX) * 3;
+      if (srcIndex + 2 >= rgbSize) {
+        continue;
+      }
+
+      const uint8_t r = rgb[srcIndex];
+      const uint8_t g = rgb[srcIndex + 1];
+      const uint8_t b = rgb[srcIndex + 2];
+      const int luma = (77 * r + 150 * g + 29 * b) >> 8;
+      const int threshold = 96 + (int)kBayer4[y & 0x03][x & 0x03] * 4;
+      const bool black = luma < threshold;
+      if (black) {
+        const int bitIndex = y * CAMERA_PREVIEW_WIDTH + x;
+        outBits[bitIndex / 8] &= (uint8_t)~(0x80 >> (bitIndex % 8));
+      }
+    }
+  }
+
+  free(rgb);
   return true;
 }

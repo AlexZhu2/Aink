@@ -2,6 +2,7 @@
 #define VISION_SERVICE_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdbool.h>
 
 typedef enum {
@@ -16,5 +17,6 @@ typedef enum {
 } VisionResult;
 
 VisionResult vision_service_describe_camera(char *outText, size_t outLen);
+VisionResult vision_service_describe_jpeg(const uint8_t *jpeg, size_t jpegLen, char *outText, size_t outLen);
 
 #endif

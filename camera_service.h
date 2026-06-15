@@ -7,6 +7,10 @@
 
 #include "esp_camera.h"
 
+#define CAMERA_PREVIEW_WIDTH 100
+#define CAMERA_PREVIEW_HEIGHT 100
+#define CAMERA_PREVIEW_BYTES ((CAMERA_PREVIEW_WIDTH * CAMERA_PREVIEW_HEIGHT + 7) / 8)
+
 bool camera_service_init(void);
 bool camera_service_is_ready(void);
 
@@ -24,5 +28,11 @@ bool camera_service_set_framesize(framesize_t size);
  * Caller must free(*outRgb) with free().
  */
 bool camera_service_frame_to_rgb888(const camera_fb_t *fb, uint8_t **outRgb, size_t *outSize);
+
+/**
+ * Convert a captured frame to a 100x100 1bpp preview bitmap.
+ * Output bit value follows e-paper convention: 1 = white, 0 = black.
+ */
+bool camera_service_frame_to_mono_preview100(const camera_fb_t *fb, uint8_t *outBits, size_t outBitsLen);
 
 #endif

@@ -141,6 +141,7 @@ static bool httpPostJson(const char *url, const char *authHeader, const char *au
   WiFiClientSecure client;
   client.setInsecure();
   client.setTimeout(VISION_HTTP_TIMEOUT_MS);
+  client.setHandshakeTimeout(30);
 
   HTTPClient http;
   if (!http.begin(client, url)) {
@@ -166,10 +167,13 @@ static bool httpPostJson(const char *url, const char *authHeader, const char *au
     *outResponse = http.getString();
   } else {
     *outResponse = http.errorToString(*outHttpCode);
+    char sslError[120];
+    const int sslCode = client.lastError(sslError, sizeof(sslError));
     Serial.printf("[Vision] POST fail heap=%u block=%u err=%s\r\n",
                   (unsigned)ESP.getFreeHeap(),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                   outResponse->c_str());
+    Serial.printf("[Vision] TLS lastError=%d %s\r\n", sslCode, sslError);
   }
   http.end();
   return *outHttpCode > 0;
@@ -479,7 +483,7 @@ static bool buildGeminiBody(const char *systemText, const char *userText, const 
 }
 
 static VisionResult requestOpenAiCompatible(AiProvider provider, const char *url, const char *apiKey,
-                                            const char *model, char *base64Jpeg, char *outText,
+                                            const char *model, const char *base64Jpeg, char *outText,
                                             size_t outLen) {
   char bearerAuth[160];
   snprintf(bearerAuth, sizeof(bearerAuth), "Bearer %s", apiKey);
@@ -491,10 +495,8 @@ static VisionResult requestOpenAiCompatible(AiProvider provider, const char *url
 
   char *body = nullptr;
   if (!buildOpenAiCompatibleBody(model, system_prompt(), user_prompt(), base64Jpeg, maxTokensKey, &body)) {
-    free(base64Jpeg);
     return VISION_RESULT_HTTP_FAIL;
   }
-  free(base64Jpeg);
 
   String response;
   int httpCode = 0;
@@ -503,6 +505,9 @@ static VisionResult requestOpenAiCompatible(AiProvider provider, const char *url
 
   if (!posted || httpCode < 200 || httpCode >= 300) {
     Serial.printf("[Vision] HTTP %d %s\r\n", httpCode, response.c_str());
+    if (httpCode == 401 || httpCode == 403) {
+      return VISION_RESULT_NO_API;
+    }
     return VISION_RESULT_HTTP_FAIL;
   }
 
@@ -542,6 +547,105 @@ static VisionResult requestGemini(const char *apiKey, const char *model, char *b
     return VISION_RESULT_PARSE_FAIL;
   }
   return VISION_RESULT_OK;
+}
+
+static VisionResult requestMimoCompatible(const char *apiKey, const char *model,
+                                          const char *base64Jpeg, char *outText,
+                                          size_t outLen) {
+  static const char *kMimoUrls[] = {
+      "https://api.xiaomimimo.com/v1/chat/completions",
+      "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+      "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions",
+      "https://token-plan-ams.xiaomimimo.com/v1/chat/completions",
+  };
+
+  VisionResult lastResult = VISION_RESULT_HTTP_FAIL;
+  for (size_t i = 0; i < sizeof(kMimoUrls) / sizeof(kMimoUrls[0]); i++) {
+    Serial.printf("[Vision] MiMo endpoint %u/%u\r\n",
+                  (unsigned)(i + 1),
+                  (unsigned)(sizeof(kMimoUrls) / sizeof(kMimoUrls[0])));
+    lastResult = requestOpenAiCompatible(AI_PROVIDER_MIMO, kMimoUrls[i], apiKey,
+                                         model, base64Jpeg, outText, outLen);
+    if (lastResult == VISION_RESULT_OK) {
+      return VISION_RESULT_OK;
+    }
+    if (lastResult != VISION_RESULT_HTTP_FAIL && lastResult != VISION_RESULT_NO_API) {
+      return lastResult;
+    }
+  }
+  return lastResult;
+}
+
+VisionResult vision_service_describe_jpeg(const uint8_t *jpeg, size_t jpegLen, char *outText, size_t outLen) {
+  if (outText == nullptr || outLen == 0) {
+    return VISION_RESULT_HTTP_FAIL;
+  }
+  outText[0] = '\0';
+
+  if (jpeg == nullptr || jpegLen == 0 || jpegLen > VISION_MAX_JPEG_BYTES) {
+    Serial.printf("[Vision] invalid jpeg len=%u\r\n", (unsigned)jpegLen);
+    return VISION_RESULT_CAPTURE_FAIL;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[Vision] no wifi");
+    return VISION_RESULT_NO_WIFI;
+  }
+  if (!settings_api_has_api_key()) {
+    Serial.println("[Vision] no api key");
+    return VISION_RESULT_NO_API;
+  }
+
+  const AiProvider provider = settings_api_get_provider();
+  if (!ai_provider_supports_vision(provider)) {
+    Serial.printf("[Vision] provider unsupported: %s\r\n", ai_provider_name(provider));
+    return VISION_RESULT_UNSUPPORTED;
+  }
+
+  const int modelIndex = settings_api_get_model_index();
+  if (!ai_provider_model_supports_vision(provider, modelIndex)) {
+    Serial.printf("[Vision] model unsupported for vision: %s\r\n", settings_api_get_model_id());
+    return VISION_RESULT_UNSUPPORTED;
+  }
+
+  char apiKey[129];
+  settings_api_get_api_key(apiKey, sizeof(apiKey));
+  const char *model = settings_api_get_model_id();
+
+  Serial.printf("[Vision] JPEG %u bytes, encoding b64...\r\n", (unsigned)jpegLen);
+  Serial.flush();
+
+  char *base64 = nullptr;
+  size_t base64Len = 0;
+  if (!encodeBase64(jpeg, jpegLen, &base64, &base64Len)) {
+    Serial.println("[Vision] base64 encode failed");
+    return VISION_RESULT_CAPTURE_FAIL;
+  }
+
+  Serial.printf("[Vision] b64 %u bytes, provider=%s model=%s, posting...\r\n",
+                (unsigned)base64Len, ai_provider_name(provider), model);
+  Serial.flush();
+
+  VisionResult result = VISION_RESULT_HTTP_FAIL;
+  if (provider == AI_PROVIDER_GEMINI) {
+    result = requestGemini(apiKey, model, base64, outText, outLen);
+    base64 = nullptr;
+  } else if (provider == AI_PROVIDER_MIMO) {
+    result = requestMimoCompatible(apiKey, model, base64, outText, outLen);
+  } else {
+    const char *url = ai_provider_chat_completions_url(provider);
+    if (url == nullptr || url[0] == '\0') {
+      free(base64);
+      return VISION_RESULT_UNSUPPORTED;
+    }
+    result = requestOpenAiCompatible(provider, url, apiKey, model, base64, outText, outLen);
+  }
+  free(base64);
+
+  if (result == VISION_RESULT_OK) {
+    Serial.printf("[Vision] %s\r\n", outText);
+  }
+
+  return result;
 }
 
 VisionResult vision_service_describe_camera(char *outText, size_t outLen) {
@@ -621,6 +725,9 @@ VisionResult vision_service_describe_camera(char *outText, size_t outLen) {
   VisionResult result = VISION_RESULT_HTTP_FAIL;
   if (provider == AI_PROVIDER_GEMINI) {
     result = requestGemini(apiKey, model, base64, outText, outLen);
+    base64 = nullptr;
+  } else if (provider == AI_PROVIDER_MIMO) {
+    result = requestMimoCompatible(apiKey, model, base64, outText, outLen);
   } else {
     const char *url = ai_provider_chat_completions_url(provider);
     if (url == nullptr || url[0] == '\0') {
@@ -629,6 +736,7 @@ VisionResult vision_service_describe_camera(char *outText, size_t outLen) {
     }
     result = requestOpenAiCompatible(provider, url, apiKey, model, base64, outText, outLen);
   }
+  free(base64);
 
   if (result == VISION_RESULT_OK) {
     Serial.printf("[Vision] %s\r\n", outText);
