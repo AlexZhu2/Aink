@@ -7,6 +7,7 @@
 #include "ui_stock.h"
 #include "ui_weather.h"
 #include "ui_vision.h"
+#include "ui_voice.h"
 #include "ui_clock.h"
 
 static AppLanguage s_lang = APP_LANG_EN;
@@ -230,5 +231,6 @@ void app_locale_refresh_all(void) {
   ui_weather_refresh();
   ui_stock_refresh();
   ui_vision_refresh();
+  ui_voice_refresh();
   ui_clock_refresh_locale();
 }

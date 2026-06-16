@@ -5,18 +5,18 @@
 #include "ui_settings.h"
 #include "ui_stock.h"
 #include "ui_vision.h"
+#include "ui_voice.h"
 #include "ui_weather.h"
 #include "ui_clock.h"
+#include "voice_service.h"
 
 #include <Arduino.h>
 #include <stdio.h>
 
 static bool s_onHome = true;
-static bool s_voiceListening = false;
 
 void ui_nav_init(void) {
   s_onHome = true;
-  s_voiceListening = false;
   ui_home_show();
 }
 
@@ -42,6 +42,32 @@ bool ui_nav_is_stock(void) {
 
 bool ui_nav_is_clock(void) {
   return !s_onHome && ui_clock_is_active();
+}
+
+static void go_home(UiRefreshMode *outRefreshMode) {
+  if (ui_vision_is_active()) {
+    ui_vision_leave();
+  }
+  ui_home_show();
+  s_onHome = true;
+  if (outRefreshMode != nullptr) {
+    *outRefreshMode = UI_REFRESH_NAV;
+  }
+}
+
+static bool open_voice_interaction(UiRefreshMode *outRefreshMode) {
+  if (ui_vision_is_active()) {
+    ui_vision_leave();
+  }
+  if (!voice_service_toggle_recording()) {
+    Serial.println("[Voice] toggle ignored");
+  }
+  ui_voice_show();
+  s_onHome = false;
+  if (outRefreshMode != nullptr) {
+    *outRefreshMode = UI_REFRESH_NAV;
+  }
+  return true;
 }
 
 static void open_focused_tile(void) {
@@ -70,6 +96,17 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
     return false;
   }
 
+  if (action == BTN_ACTION_NEXT && voice_service_state() == VOICE_STATE_SPEAKING) {
+    if (voice_service_interrupt_speaker()) {
+      ui_voice_show();
+      s_onHome = false;
+      if (outRefreshMode != nullptr) {
+        *outRefreshMode = UI_REFRESH_NAV;
+      }
+      return true;
+    }
+  }
+
   if (s_onHome) {
     switch (action) {
       case BTN_ACTION_NEXT:
@@ -93,8 +130,27 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
       case BTN_ACTION_BACK:
         return false;
       case BTN_ACTION_VOICE_TOGGLE:
-        s_voiceListening = !s_voiceListening;
-        Serial.printf("[Voice] listening=%s (stub)\n", s_voiceListening ? "on" : "off");
+        return open_voice_interaction(outRefreshMode);
+      default:
+        return false;
+    }
+  }
+
+  if (ui_voice_is_active()) {
+    switch (action) {
+      case BTN_ACTION_BACK:
+        go_home(outRefreshMode);
+        return true;
+      case BTN_ACTION_VOICE_TOGGLE:
+        return open_voice_interaction(outRefreshMode);
+      case BTN_ACTION_NEXT:
+        if (voice_service_interrupt_speaker()) {
+          ui_voice_refresh();
+          if (outRefreshMode != nullptr) {
+            *outRefreshMode = UI_REFRESH_NAV;
+          }
+          return true;
+        }
         return false;
       default:
         return false;
@@ -132,16 +188,10 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
           }
           return true;
         }
-        ui_home_show();
-        s_onHome = true;
-        if (outRefreshMode != nullptr) {
-          *outRefreshMode = UI_REFRESH_NAV;
-        }
+        go_home(outRefreshMode);
         return true;
       case BTN_ACTION_VOICE_TOGGLE:
-        s_voiceListening = !s_voiceListening;
-        Serial.printf("[Voice] listening=%s (stub)\n", s_voiceListening ? "on" : "off");
-        return false;
+        return open_voice_interaction(outRefreshMode);
       default:
         return false;
     }
@@ -159,17 +209,10 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
         }
         return false;
       case BTN_ACTION_BACK:
-        ui_vision_leave();
-        ui_home_show();
-        s_onHome = true;
-        if (outRefreshMode != nullptr) {
-          *outRefreshMode = UI_REFRESH_NAV;
-        }
+        go_home(outRefreshMode);
         return true;
       case BTN_ACTION_VOICE_TOGGLE:
-        s_voiceListening = !s_voiceListening;
-        Serial.printf("[Voice] listening=%s (stub)\n", s_voiceListening ? "on" : "off");
-        return false;
+        return open_voice_interaction(outRefreshMode);
       default:
         return false;
     }
@@ -178,16 +221,10 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
   if (ui_clock_is_active()) {
     switch (action) {
       case BTN_ACTION_BACK:
-        ui_home_show();
-        s_onHome = true;
-        if (outRefreshMode != nullptr) {
-          *outRefreshMode = UI_REFRESH_NAV;
-        }
+        go_home(outRefreshMode);
         return true;
       case BTN_ACTION_VOICE_TOGGLE:
-        s_voiceListening = !s_voiceListening;
-        Serial.printf("[Voice] listening=%s (stub)\n", s_voiceListening ? "on" : "off");
-        return false;
+        return open_voice_interaction(outRefreshMode);
       default:
         return false;
     }
@@ -195,16 +232,10 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
 
   switch (action) {
     case BTN_ACTION_BACK:
-      ui_home_show();
-      s_onHome = true;
-      if (outRefreshMode != nullptr) {
-        *outRefreshMode = UI_REFRESH_NAV;
-      }
+      go_home(outRefreshMode);
       return true;
     case BTN_ACTION_VOICE_TOGGLE:
-      s_voiceListening = !s_voiceListening;
-      Serial.printf("[Voice] listening=%s (stub)\n", s_voiceListening ? "on" : "off");
-      return false;
+      return open_voice_interaction(outRefreshMode);
     default:
       return false;
   }
