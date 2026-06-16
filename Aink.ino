@@ -16,10 +16,12 @@
 #include "ui_settings.h"
 #include "ui_nav.h"
 #include "ui_vision.h"
+#include "ui_voice.h"
 #include "ui_clock.h"
 #include "ui_refresh.h"
 #include "settings_api.h"
 #include "app_locale.h"
+#include "voice_service.h"
 
 extern "C" {
 #include "qrcode.h"
@@ -87,6 +89,7 @@ static bool networkTimeSyncRequested = false;
 static bool networkWeatherForcePending = false;
 static bool networkWeatherServicePending = false;
 static bool networkStockForcePending = false;
+static bool networkDnsConfigured = false;
 static unsigned long lastUserInputMs = 0;
 static unsigned long wifiConnectStartMs = 0;
 static unsigned long nextWifiAttemptMs = 0;
@@ -97,6 +100,8 @@ static void serviceStockNameRetry(bool wifiConnected, bool inputIdle);
 static void requestNetworkWeatherFetch(bool force);
 static bool serviceDisplayBootState(void);
 static bool isWifiConnected();
+static bool isZeroIp(const IPAddress &ip);
+static void configureStationDns(void);
 static void enterPortalMode();
 static void drawStatusBarRegion(UBYTE *image, int batteryPercent, bool wifiConnected,
                                 bool showWeather, WeatherIconKind weatherIcon, int weatherTempC);
@@ -277,6 +282,30 @@ static void requestNetworkWeatherFetch(bool force) {
   }
 }
 
+static void configureStationDns(void) {
+  if (networkDnsConfigured || !isWifiConnected()) {
+    return;
+  }
+
+  const IPAddress dns1(223, 5, 5, 5);
+  const IPAddress dns2(119, 29, 29, 29);
+  if (WiFi.setDNS(dns1, dns2)) {
+    Serial.printf("[WiFi] DNS set: %s, %s\n",
+                  dns1.toString().c_str(), dns2.toString().c_str());
+  } else {
+    Serial.println("[WiFi] DNS set failed");
+  }
+
+  IPAddress mimoIp;
+  if (WiFi.hostByName("api.xiaomimimo.com", mimoIp) && !isZeroIp(mimoIp)) {
+    Serial.printf("[WiFi] MiMo DNS api.xiaomimimo.com -> %s\n",
+                  mimoIp.toString().c_str());
+    networkDnsConfigured = true;
+  } else {
+    Serial.println("[WiFi] MiMo DNS lookup failed");
+  }
+}
+
 static void serviceNetworkStateMachine(bool allowBlockingWork) {
   if (portalModeActive) {
     return;
@@ -290,6 +319,7 @@ static void serviceNetworkStateMachine(bool allowBlockingWork) {
       if (wifiConnected) {
         Serial.print("[WiFi] IP: ");
         Serial.println(WiFi.localIP());
+        configureStationDns();
         wifiReconnectFailures = 0;
         networkState = NET_IDLE;
         beginNetworkTimeSync();
@@ -346,6 +376,7 @@ static void serviceNetworkStateMachine(bool allowBlockingWork) {
   }
 
   if (!wifiConnected) {
+    networkDnsConfigured = false;
     if (hasStoredWiFiCredentials() && now >= nextWifiAttemptMs) {
       if (!startStoredWiFiConnect()) {
         nextWifiAttemptMs = now + WIFI_RECONNECT_BACKOFF_MS;
@@ -353,6 +384,8 @@ static void serviceNetworkStateMachine(bool allowBlockingWork) {
     }
     return;
   }
+
+  configureStationDns();
 
   if (networkTimeSyncRequested) {
     beginNetworkTimeSync();
@@ -903,10 +936,12 @@ static void startNormalOperation() {
   btn_input_init();
   ui_lvgl_init();
   app_locale_init();
+  voice_service_init();
   ui_home_init();
   ui_weather_init();
   ui_stock_init();
   ui_vision_init();
+  ui_voice_init();
   ui_clock_init();
   ui_settings_init();
   ui_nav_init();
@@ -959,6 +994,10 @@ static void drawWifiIcon(UBYTE *image, UWORD ox, UWORD oy, bool connected) {
 
 static bool isWifiConnected() {
   return WiFi.status() == WL_CONNECTED;
+}
+
+static bool isZeroIp(const IPAddress &ip) {
+  return ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0;
 }
 
 static void drawWeatherIcon(UBYTE *image, UWORD ox, UWORD oy, WeatherIconKind kind) {
@@ -1319,6 +1358,11 @@ void loop() {
     requestDisplayRefresh(visionMode);
   }
 
+  UiRefreshMode voiceMode = UI_REFRESH_NONE;
+  if (ui_voice_service(&voiceMode)) {
+    requestDisplayRefresh(voiceMode);
+  }
+
   const bool wifiConnected = isWifiConnected();
   const int wifiState = wifiConnected ? 1 : 0;
   WeatherSnapshot weatherSnap = {};
@@ -1345,15 +1389,21 @@ void loop() {
     }
   }
 
-  serviceDisplayRefresh(false);
+  const bool voiceBusy = voice_service_is_busy();
+  const VoiceState voiceState = voice_service_state();
+  if (!voiceBusy || voiceState == VOICE_STATE_RECORDING) {
+    serviceDisplayRefresh(false);
+  }
   const bool inputIdle = lastUserInputMs == 0 ||
                          (millis() - lastUserInputMs) >= NETWORK_IDLE_AFTER_INPUT_MS;
   const bool visionIdle = !ui_vision_is_busy();
+  const bool voiceIdle = !voiceBusy;
   serviceNetworkStateMachine(displayBootState == DISPLAY_BOOT_READY &&
                              !displayRefreshPending &&
                              !epaper_upload_active() &&
                              inputIdle &&
-                             visionIdle);
-  serviceStockNameRetry(wifiConnected, inputIdle && visionIdle);
+                             visionIdle &&
+                             voiceIdle);
+  serviceStockNameRetry(wifiConnected, inputIdle && visionIdle && voiceIdle);
   delay(50);
 }

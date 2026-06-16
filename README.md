@@ -67,6 +67,17 @@ Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
 
 Configure API key via captive portal or **Settings → Model**. MiMo keys often start with `tp-`; Kimi Platform uses keys from [platform.kimi.ai](https://platform.kimi.ai).
 
+### Voice Interaction
+
+- **B double-click** (serial `v`): start recording from the XIAO ESP32S3 Sense PDM microphone.
+- **B double-click again**: stop recording, wrap the captured PCM as 16 kHz mono WAV, transcribe it with Xiaomi MiMo ASR, then send the transcript as text to Xiaomi MiMo.
+- Input format is finalized as **transcribed text**, not raw audio, for the chat/LLM stage. The audio is used only for STT.
+- Current STT implementation uses Xiaomi MiMo `mimo-v2.5-asr` through `/v1/chat/completions` with `input_audio.data` set to a `data:audio/wav;base64,...` URL.
+- The downstream LLM request also uses Xiaomi MiMo `/v1/chat/completions`; select **MiMo Token Plan** in Settings so the saved API key matches this voice flow.
+- During the speaking state, **A short press** interrupts the speaker state and keeps the LLM text visible on the Voice screen.
+
+The microphone uses the Sense expansion board PDM pins: GPIO42 clock and GPIO41 data. Speaker/TTS playback is represented by an interruptible state machine until a concrete speaker amp/DAC pinout and playback driver are added.
+
 ### i18n
 
 - Default language: **English**
@@ -95,7 +106,7 @@ With `BTN_SERIAL_SIM=1` in `btn_input.h`:
 | p | A double (prev) |
 | b | A long (back) |
 | c | B confirm |
-| v | B double (voice stub) |
+| v | B double (voice record toggle) |
 | h | help |
 
 ### Test vision API on PC (before flashing)
