@@ -8,6 +8,7 @@
 #include "weather_icons.h"
 #include "weather_service.h"
 #include "stock_service.h"
+#include "boot_splash.h"
 #include "epaper_canvas.h"
 #include "btn_input.h"
 #include "ui_lvgl.h"
@@ -92,7 +93,7 @@ enum NetworkState {
 
 enum DisplayBootState {
   DISPLAY_BOOT_READY = 0,
-  DISPLAY_BOOT_CLEAR_WAIT,
+  DISPLAY_BOOT_SPLASH_WAIT,
 };
 
 static NetworkState networkState = NET_IDLE;
@@ -1066,14 +1067,14 @@ static bool serviceDisplayBootState(void) {
     return true;
   }
 
-  if (displayBootState == DISPLAY_BOOT_CLEAR_WAIT) {
+  if (displayBootState == DISPLAY_BOOT_SPLASH_WAIT) {
     if (EPD_1IN54_V2_PollBusyWait()) {
       return false;
     }
     EPD_1IN54_V2_Enter_Partial();
     epaper_mark_partial_ready();
     displayBootState = DISPLAY_BOOT_READY;
-    Serial.println("[EPD] partial ready after async white clear");
+    Serial.println("[EPD] partial ready after async boot splash");
     return true;
   }
 
@@ -1084,10 +1085,11 @@ static void startNormalOperation() {
   portalModeActive = false;
   epaper_set_portal_mirror(false);
 
-  Serial.println("[EPD] full clear (~25s, async)...");
+  Serial.println("[EPD] boot splash (~25s, async)...");
   EPD_1IN54_V2_Init();
-  EPD_1IN54_V2_ClearAsync();
-  displayBootState = DISPLAY_BOOT_CLEAR_WAIT;
+  (void)boot_splash_draw_to_epaper();
+  epaper_display_base_image_async();
+  displayBootState = DISPLAY_BOOT_SPLASH_WAIT;
 
   lastDisplayedMinute = -1;
   lastWifiState = -1;
@@ -1450,7 +1452,10 @@ void loop() {
   const bool visionIdle = !ui_vision_is_busy();
   const bool answersIdle = !answersBusy;
   const bool voiceIdle = !voiceBusy;
-  serviceNetworkStateMachine(displayBootState == DISPLAY_BOOT_READY &&
+  const bool displayAllowsBackgroundWork =
+      displayBootState == DISPLAY_BOOT_READY ||
+      displayBootState == DISPLAY_BOOT_SPLASH_WAIT;
+  serviceNetworkStateMachine(displayAllowsBackgroundWork &&
                              !displayRefreshPending &&
                              !epaper_upload_active() &&
                              inputIdle &&
