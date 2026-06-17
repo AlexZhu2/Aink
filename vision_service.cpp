@@ -20,7 +20,7 @@
 #define VISION_MAX_JPEG_BYTES   (64 * 1024)
 #define VISION_MAX_TOKENS       1024
 #define VISION_OUTPUT_MAX_CHARS 40
-#define VISION_BOOK_MAX_TOKENS  128
+#define VISION_BOOK_MAX_TOKENS  256
 #define VISION_BOOK_OUTPUT_MAX_CHARS 20
 #define VISION_CAMERA_FRAME_WIDTH  240
 #define VISION_CAMERA_FRAME_HEIGHT 240
@@ -66,6 +66,60 @@ static bool appendJsonEscaped(char *buf, size_t bufLen, size_t *pos, const char 
     text++;
   }
   return true;
+}
+
+static int jsonHexNibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return c - 'a' + 10;
+  }
+  if (c >= 'A' && c <= 'F') {
+    return c - 'A' + 10;
+  }
+  return -1;
+}
+
+static bool parseJsonHex4(const String &body, int offset, uint16_t *out) {
+  if (out == nullptr || offset + 3 >= body.length()) {
+    return false;
+  }
+  uint16_t value = 0;
+  for (int i = 0; i < 4; i++) {
+    const int nibble = jsonHexNibble(body.charAt(offset + i));
+    if (nibble < 0) {
+      return false;
+    }
+    value = (uint16_t)((value << 4) | (uint16_t)nibble);
+  }
+  *out = value;
+  return true;
+}
+
+static bool appendUtf8Codepoint(char *buf, size_t bufLen, size_t *pos, uint32_t cp) {
+  if (cp <= 0x7F) {
+    return appendChar(buf, bufLen, pos, (char)cp);
+  }
+  if (cp <= 0x7FF) {
+    return appendChar(buf, bufLen, pos, (char)(0xC0 | (cp >> 6))) &&
+           appendChar(buf, bufLen, pos, (char)(0x80 | (cp & 0x3F)));
+  }
+  if (cp >= 0xD800 && cp <= 0xDFFF) {
+    return appendChar(buf, bufLen, pos, '?');
+  }
+  if (cp <= 0xFFFF) {
+    return appendChar(buf, bufLen, pos, (char)(0xE0 | (cp >> 12))) &&
+           appendChar(buf, bufLen, pos, (char)(0x80 | ((cp >> 6) & 0x3F))) &&
+           appendChar(buf, bufLen, pos, (char)(0x80 | (cp & 0x3F)));
+  }
+  if (cp <= 0x10FFFF) {
+    return appendChar(buf, bufLen, pos, (char)(0xF0 | (cp >> 18))) &&
+           appendChar(buf, bufLen, pos, (char)(0x80 | ((cp >> 12) & 0x3F))) &&
+           appendChar(buf, bufLen, pos, (char)(0x80 | ((cp >> 6) & 0x3F))) &&
+           appendChar(buf, bufLen, pos, (char)(0x80 | (cp & 0x3F)));
+  }
+  return appendChar(buf, bufLen, pos, '?');
 }
 
 static const char *describe_system_prompt(void) {
@@ -206,14 +260,41 @@ static bool httpPostJson(const char *url, const char *authHeader, const char *au
 }
 
 static bool parseJsonStringField(const String &body, const char *fieldKey, char *out, size_t outLen) {
+  if (out == nullptr || outLen == 0 || fieldKey == nullptr) {
+    return false;
+  }
+  out[0] = '\0';
+
   char search[32];
-  snprintf(search, sizeof(search), "\"%s\":\"", fieldKey);
+  snprintf(search, sizeof(search), "\"%s\"", fieldKey);
   int idx = body.indexOf(search);
   if (idx < 0) {
     return false;
   }
-
   idx += (int)strlen(search);
+  while (idx < body.length()) {
+    const char c = body.charAt(idx);
+    if (c == ':') {
+      idx++;
+      break;
+    }
+    if (c != ' ' && c != '\r' && c != '\n' && c != '\t') {
+      return false;
+    }
+    idx++;
+  }
+  while (idx < body.length()) {
+    const char c = body.charAt(idx);
+    if (c == '\"') {
+      idx++;
+      break;
+    }
+    if (c != ' ' && c != '\r' && c != '\n' && c != '\t') {
+      return false;
+    }
+    idx++;
+  }
+
   size_t w = 0;
   for (int i = idx; i < body.length() && w + 1 < outLen; i++) {
     const char c = body.charAt(i);
@@ -238,12 +319,44 @@ static bool parseJsonStringField(const String &body, const char *fieldKey, char 
         continue;
       }
       if (next == '\\' || next == '\"') {
-        out[w++] = next;
+        if (!appendChar(out, outLen, &w, next)) {
+          break;
+        }
         i++;
         continue;
       }
+      if (next == 'b' || next == 'f') {
+        i++;
+        continue;
+      }
+      if (next == 'u') {
+        uint16_t first = 0;
+        if (parseJsonHex4(body, i + 2, &first)) {
+          uint32_t cp = first;
+          int consumed = 5;
+          if (first >= 0xD800 && first <= 0xDBFF &&
+              i + 11 < body.length() &&
+              body.charAt(i + 6) == '\\' &&
+              body.charAt(i + 7) == 'u') {
+            uint16_t second = 0;
+            if (parseJsonHex4(body, i + 8, &second) &&
+                second >= 0xDC00 && second <= 0xDFFF) {
+              cp = 0x10000UL + (((uint32_t)first - 0xD800UL) << 10) +
+                   ((uint32_t)second - 0xDC00UL);
+              consumed = 11;
+            }
+          }
+          if (!appendUtf8Codepoint(out, outLen, &w, cp)) {
+            break;
+          }
+          i += consumed;
+          continue;
+        }
+      }
     }
-    out[w++] = c;
+    if (!appendChar(out, outLen, &w, c)) {
+      break;
+    }
   }
   out[w] = '\0';
   return w > 0;
