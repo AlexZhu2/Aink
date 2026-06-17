@@ -1,13 +1,13 @@
 #include "ui_nav.h"
 
 #include "app_locale.h"
+#include "ui_answers.h"
 #include "ui_home.h"
 #include "ui_settings.h"
 #include "ui_stock.h"
 #include "ui_vision.h"
 #include "ui_voice.h"
 #include "ui_weather.h"
-#include "ui_answerbook.h"
 #include "ui_clock.h"
 #include "voice_service.h"
 
@@ -37,6 +37,10 @@ bool ui_nav_is_vision(void) {
   return !s_onHome && ui_vision_is_active();
 }
 
+bool ui_nav_is_answers(void) {
+  return !s_onHome && ui_answers_is_active();
+}
+
 bool ui_nav_is_stock(void) {
   return !s_onHome && ui_stock_is_active();
 }
@@ -45,16 +49,12 @@ bool ui_nav_is_clock(void) {
   return !s_onHome && ui_clock_is_active();
 }
 
-bool ui_nav_is_answerbook(void) {
-  return !s_onHome && ui_answerbook_is_active();
-}
-
 static void go_home(UiRefreshMode *outRefreshMode) {
   if (ui_vision_is_active()) {
     ui_vision_leave();
   }
-  if (ui_answerbook_is_active()) {
-    ui_answerbook_leave();
+  if (ui_answers_is_active()) {
+    ui_answers_leave();
   }
   ui_home_show();
   s_onHome = true;
@@ -67,8 +67,8 @@ static bool open_voice_interaction(UiRefreshMode *outRefreshMode) {
   if (ui_vision_is_active()) {
     ui_vision_leave();
   }
-  if (ui_answerbook_is_active()) {
-    ui_answerbook_leave();
+  if (ui_answers_is_active()) {
+    ui_answers_leave();
   }
   if (!voice_service_toggle_recording()) {
     Serial.println("[Voice] toggle ignored");
@@ -90,11 +90,11 @@ static void open_focused_tile(void) {
   } else if (focus == 2) {
     ui_vision_show();
   } else if (focus == 3) {
-    ui_stock_show();
+    ui_answers_show();
   } else if (focus == 4) {
-    ui_settings_show();
+    ui_stock_show();
   } else if (focus == 5) {
-    ui_answerbook_show();
+    ui_settings_show();
   } else {
     ui_detail_show(ui_home_focus_title(), app_tr(TR_COMING_SOON));
   }
@@ -231,24 +231,12 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
     }
   }
 
-  if (ui_clock_is_active()) {
-    switch (action) {
-      case BTN_ACTION_BACK:
-        go_home(outRefreshMode);
-        return true;
-      case BTN_ACTION_VOICE_TOGGLE:
-        return open_voice_interaction(outRefreshMode);
-      default:
-        return false;
-    }
-  }
-
-  if (ui_answerbook_is_active()) {
+  if (ui_answers_is_active()) {
     switch (action) {
       case BTN_ACTION_NEXT:
       {
         UiRefreshMode answerMode = UI_REFRESH_NONE;
-        if (ui_answerbook_next(&answerMode)) {
+        if (ui_answers_next(&answerMode)) {
           if (outRefreshMode != nullptr) {
             *outRefreshMode = answerMode;
           }
@@ -259,7 +247,7 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
       case BTN_ACTION_CONFIRM:
       {
         UiRefreshMode answerMode = UI_REFRESH_NONE;
-        if (ui_answerbook_confirm(&answerMode)) {
+        if (ui_answers_confirm(&answerMode)) {
           if (outRefreshMode != nullptr) {
             *outRefreshMode = answerMode;
           }
@@ -268,12 +256,19 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
         return false;
       }
       case BTN_ACTION_BACK:
-        ui_answerbook_leave();
-        ui_home_show();
-        s_onHome = true;
-        if (outRefreshMode != nullptr) {
-          *outRefreshMode = UI_REFRESH_NAV;
-        }
+        go_home(outRefreshMode);
+        return true;
+      case BTN_ACTION_VOICE_TOGGLE:
+        return open_voice_interaction(outRefreshMode);
+      default:
+        return false;
+    }
+  }
+
+  if (ui_clock_is_active()) {
+    switch (action) {
+      case BTN_ACTION_BACK:
+        go_home(outRefreshMode);
         return true;
       case BTN_ACTION_VOICE_TOGGLE:
         return open_voice_interaction(outRefreshMode);

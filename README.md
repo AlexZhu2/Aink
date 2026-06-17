@@ -31,7 +31,7 @@ Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
 
 - WiFi captive portal + QR setup; credentials stored in NVS
 - Status bar: single datetime line, dynamic weather icon/temp, battery (hand-drawn 8×16 ASCII on the physical right edge)
-- 2×2 launcher with tile icons; A = move focus, B = open app, A long = back
+- Paged 2×2 launcher with tile icons; A = move focus, B = open app, A long = back
 - LVGL 8.3 main UI (200×180) + 1-bit e-paper flush
 - Refresh modes: FAST / NAV / QUALITY / FULL
 - NTP (UTC+8)
@@ -42,7 +42,8 @@ Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
 |------|--------|
 | Weather | QWeather forecast, metrics, AQI/UV, 3-day outlook (tomorrow onward) |
 | **AI Vision** | Camera capture + cloud poetic description (≤40 Chinese chars); eye icon on launcher |
-| App 3 | Placeholder |
+| **Answers** | Book of Answers app with photo oracle, obfuscated upload, and local random answers |
+| Stocks | Watchlist quotes and change preview |
 | Settings | WiFi, **QWeather key/host**, AI provider/model/API key, Display, About; gear icon on launcher; EN/ZH |
 
 ### Weather (QWeather / 和风)
@@ -66,6 +67,13 @@ Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
 - Camera pauses during HTTPS to avoid `cam_hal: FB-OVF` (frame buffer overflow warnings)
 
 Configure API key via captive portal or **Settings → Model**. MiMo keys often start with `tp-`; Kimi Platform uses keys from [platform.kimi.ai](https://platform.kimi.ai).
+
+### Answers
+
+- Open the **Answers / 答案之书** launcher app. Press **A short press** (serial `n`) to switch between **photo oracle** and **local random answer**, then press **B** to confirm.
+- In photo oracle mode, the app shows a mosaic camera preview. Press **A short press** to capture; the firmware uploads only a pixel-obfuscated JPEG and asks the configured vision provider for a Book of Answers style response.
+- Responses are truncated to 20 UTF-8 characters on-device.
+- If WiFi is offline, the API key is missing, the provider/model is unavailable, image obfuscation fails, or the API request fails, the app falls back to the built-in local answer list instead of blocking on an error.
 
 ### Voice Interaction
 
@@ -102,7 +110,7 @@ With `BTN_SERIAL_SIM=1` in `btn_input.h`:
 
 | Key | Action |
 |-----|--------|
-| n | A click (next / **capture in AI Vision**) |
+| n | A click (next / **capture in AI Vision or Answers photo mode**) |
 | p | A double (prev) |
 | b | A long (back) |
 | c | B confirm |
@@ -164,8 +172,9 @@ epaper_canvas.*       Framebuffer, rotation, EPD upload
 ui_home / ui_nav      Launcher (tile icons) and navigation
 ui_weather.*          Weather app
 ui_vision.*           AI Vision UI
+ui_answers.*          Book of Answers UI
 ui_settings.*         Settings app (multi-level menu)
-vision_service.*      Camera → HTTPS vision API → normalized text
+vision_service.*      Camera JPEG → optional obfuscation → HTTPS vision API → normalized text
 camera_service.*      XIAO Sense camera (240×240 JPEG)
 ai_model_config.*     Provider/model presets and URLs
 app_locale.*          EN/ZH strings

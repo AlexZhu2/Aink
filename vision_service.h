@@ -14,9 +14,11 @@ typedef enum {
   VISION_RESULT_CAPTURE_FAIL,
   VISION_RESULT_HTTP_FAIL,
   VISION_RESULT_PARSE_FAIL,
+  VISION_RESULT_LOCAL_FALLBACK,
 } VisionResult;
 
 VisionResult vision_service_describe_camera(char *outText, size_t outLen);
 VisionResult vision_service_describe_jpeg(const uint8_t *jpeg, size_t jpegLen, char *outText, size_t outLen);
+VisionResult vision_service_book_answer_jpeg(const uint8_t *jpeg, size_t jpegLen, char *outText, size_t outLen);
 
 #endif

@@ -35,9 +35,9 @@ static AppStrId logical_tile_str_id(int logicalIndex) {
     TR_TILE_CLOCK,
     TR_TILE_WEATHER,
     TR_TILE_APP2,
+    TR_TILE_BOOK,
     TR_TILE_APP3,
     TR_TILE_SETTINGS,
-    TR_TILE_ANSWERBOOK,
   };
   if (logicalIndex < 0 || logicalIndex >= HOME_LOGICAL_COUNT) {
     return TR_APP;
@@ -136,6 +136,11 @@ static void bind_vision_slot(int slot) {
   lv_label_set_text(s_subLabels[slot], app_tr(TR_VISION_HINT));
 }
 
+static void bind_book_slot(int slot) {
+  canvas_set_bitmap_icon(s_iconCanvas[slot], answerbook_bitmap);
+  lv_label_set_text(s_subLabels[slot], app_tr(TR_ANSWERBOOK_HINT));
+}
+
 static void bind_stock_slot(int slot) {
   canvas_set_bitmap_icon(s_iconCanvas[slot], stock_chart_bitmap);
 
@@ -159,11 +164,6 @@ static void bind_settings_slot(int slot) {
                      settings_api_is_wifi_connected() ? app_tr(TR_ONLINE) : app_tr(TR_OFFLINE));
 }
 
-static void bind_answerbook_slot(int slot) {
-  canvas_set_bitmap_icon(s_iconCanvas[slot], answerbook_bitmap);
-  lv_label_set_text(s_subLabels[slot], app_tr(TR_ANSWERBOOK_HINT));
-}
-
 static void bind_slot_content(int slot, int logicalIndex) {
   if (logicalIndex < 0 || logicalIndex >= HOME_LOGICAL_COUNT) {
     lv_obj_add_flag(s_tiles[slot], LV_OBJ_FLAG_HIDDEN);
@@ -184,13 +184,13 @@ static void bind_slot_content(int slot, int logicalIndex) {
       bind_vision_slot(slot);
       break;
     case 3:
-      bind_stock_slot(slot);
+      bind_book_slot(slot);
       break;
     case 4:
-      bind_settings_slot(slot);
+      bind_stock_slot(slot);
       break;
     case 5:
-      bind_answerbook_slot(slot);
+      bind_settings_slot(slot);
       break;
     default:
       break;
@@ -342,22 +342,8 @@ void ui_home_refresh_stocks(void) {
 
   for (int slot = 0; slot < HOME_SLOTS_PER_PAGE; slot++) {
     const int logicalIndex = s_homePage * HOME_SLOTS_PER_PAGE + slot;
-    if (logicalIndex == 3) {
+    if (logicalIndex == 4) {
       bind_stock_slot(slot);
-      lv_obj_invalidate(s_tiles[slot]);
-    }
-  }
-}
-
-void ui_home_refresh_answerbook(void) {
-  if (s_screenHome == nullptr || lv_scr_act() != s_screenHome) {
-    return;
-  }
-
-  for (int slot = 0; slot < HOME_SLOTS_PER_PAGE; slot++) {
-    const int logicalIndex = s_homePage * HOME_SLOTS_PER_PAGE + slot;
-    if (logicalIndex == 5) {
-      bind_answerbook_slot(slot);
       lv_obj_invalidate(s_tiles[slot]);
     }
   }

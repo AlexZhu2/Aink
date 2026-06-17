@@ -1,10 +1,10 @@
-#include "ui_answerbook.h"
+#include "ui_answers.h"
 
 #include "app_locale.h"
 #include "bookofanswers.h"
 #include "camera_service.h"
-#include "oracle_service.h"
 #include "ui_fonts.h"
+#include "vision_service.h"
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
@@ -14,25 +14,23 @@
 #include <stdio.h>
 #include <string.h>
 
-#define ANSWERBOOK_TASK_STACK_BYTES         16384
-#define ANSWERBOOK_PREVIEW_TASK_STACK_BYTES 12288
-#define ANSWERBOOK_PREVIEW_MS               3000U
-#define ANSWERBOOK_PREVIEW_FRAME_X          49
-#define ANSWERBOOK_PREVIEW_FRAME_Y          55
-#define ANSWERBOOK_PREVIEW_FRAME_SIZE       102
-#define ANSWERBOOK_CAPTURE_MAX_JPEG_BYTES   (64 * 1024)
-#define ANSWERBOOK_PREVIEW_BLOCK_PX         10
-#define ANSWERBOOK_JPEG_BLOCK_PX            16
-#define ANSWERBOOK_JPEG_QUALITY             16
+#define ANSWERS_TASK_STACK_BYTES         16384
+#define ANSWERS_PREVIEW_TASK_STACK_BYTES 12288
+#define ANSWERS_PREVIEW_MS               3000U
+#define ANSWERS_PREVIEW_FRAME_X          49
+#define ANSWERS_PREVIEW_FRAME_Y          55
+#define ANSWERS_PREVIEW_FRAME_SIZE       102
+#define ANSWERS_CAPTURE_MAX_JPEG_BYTES   (64 * 1024)
+#define ANSWERS_PREVIEW_BLOCK_PX         10
 
 typedef enum {
-  ANSWERBOOK_VIEW_MENU = 0,
-  ANSWERBOOK_VIEW_CAMERA,
-  ANSWERBOOK_VIEW_BUSY,
-  ANSWERBOOK_VIEW_RESULT,
-} AnswerBookView;
+  ANSWERS_VIEW_MENU = 0,
+  ANSWERS_VIEW_CAMERA,
+  ANSWERS_VIEW_BUSY,
+  ANSWERS_VIEW_RESULT,
+} AnswersView;
 
-static lv_obj_t *s_screenAnswerbook = nullptr;
+static lv_obj_t *s_screenAnswers = nullptr;
 static lv_obj_t *s_titleLabel = nullptr;
 static lv_obj_t *s_optionLabels[2] = {nullptr, nullptr};
 static lv_obj_t *s_answerLabel = nullptr;
@@ -41,7 +39,7 @@ static lv_obj_t *s_previewFrame = nullptr;
 static lv_obj_t *s_previewCanvas = nullptr;
 static lv_color_t *s_previewBuf = nullptr;
 
-static AnswerBookView s_view = ANSWERBOOK_VIEW_MENU;
+static AnswersView s_view = ANSWERS_VIEW_MENU;
 static uint8_t s_selectedOption = 0;
 static bool s_busy = false;
 static TaskHandle_t s_askTask = nullptr;
@@ -50,7 +48,7 @@ static SemaphoreHandle_t s_cameraMutex = nullptr;
 static portMUX_TYPE s_resultMux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_visible = false;
 static bool s_resultReady = false;
-static OracleResult s_resultCode = ORACLE_RESULT_HTTP_FAIL;
+static VisionResult s_resultCode = VISION_RESULT_HTTP_FAIL;
 static char s_resultText[64];
 static bool s_previewEnabled = false;
 static bool s_previewFrozen = false;
@@ -61,7 +59,7 @@ static uint8_t s_previewBits[CAMERA_PREVIEW_BYTES];
 static char s_currentAnswer[64];
 static char s_currentSource[32];
 
-static void answerbookPreviewTask(void *param);
+static void answersPreviewTask(void *param);
 static void ensurePreviewTask(void);
 
 static void styleLabel(lv_obj_t *label, const lv_font_t *font) {
@@ -95,7 +93,7 @@ static bool previewCaptureAllowed(void) {
   bool allowed = false;
   portENTER_CRITICAL(&s_resultMux);
   allowed = s_visible && s_previewEnabled && !s_previewFrozen && !s_busy &&
-            s_view == ANSWERBOOK_VIEW_CAMERA;
+            s_view == ANSWERS_VIEW_CAMERA;
   portEXIT_CRITICAL(&s_resultMux);
   return allowed;
 }
@@ -106,7 +104,7 @@ static bool ensureCameraMutex(void) {
   }
   s_cameraMutex = xSemaphoreCreateMutex();
   if (s_cameraMutex == nullptr) {
-    Serial.println("[AnswerBook] camera mutex create failed");
+    Serial.println("[Answers] camera mutex create failed");
     return false;
   }
   return true;
@@ -126,7 +124,7 @@ static bool ensurePreviewBuffer(void) {
         heap_caps_malloc(bufSize, MALLOC_CAP_8BIT));
   }
   if (s_previewBuf == nullptr) {
-    Serial.printf("[AnswerBook] preview buffer alloc failed size=%u\r\n",
+    Serial.printf("[Answers] preview buffer alloc failed size=%u\r\n",
                   (unsigned)bufSize);
     return false;
   }
@@ -197,19 +195,19 @@ static bool consumePreviewFrame(void) {
   return true;
 }
 
-static const char *answerbookErrorText(OracleResult result) {
+static const char *answersErrorText(VisionResult result) {
   switch (result) {
-    case ORACLE_RESULT_NO_CAMERA:
+    case VISION_RESULT_NO_CAMERA:
       return app_tr(TR_VISION_NO_CAMERA);
-    case ORACLE_RESULT_NO_WIFI:
+    case VISION_RESULT_NO_WIFI:
       return app_tr(TR_VISION_NO_WIFI);
-    case ORACLE_RESULT_NO_API:
+    case VISION_RESULT_NO_API:
       return app_tr(TR_VISION_NO_API);
-    case ORACLE_RESULT_UNSUPPORTED:
+    case VISION_RESULT_UNSUPPORTED:
       return app_tr(TR_VISION_UNSUPPORTED);
-    case ORACLE_RESULT_CAPTURE_FAIL:
+    case VISION_RESULT_CAPTURE_FAIL:
       return "读图失败";
-    case ORACLE_RESULT_PARSE_FAIL:
+    case VISION_RESULT_PARSE_FAIL:
       return "解析失败";
     default:
       return app_tr(TR_VISION_FAIL);
@@ -217,7 +215,7 @@ static const char *answerbookErrorText(OracleResult result) {
 }
 
 static void showMenu(void) {
-  s_view = ANSWERBOOK_VIEW_MENU;
+  s_view = ANSWERS_VIEW_MENU;
   setPreviewState(false, false);
   setHidden(s_previewFrame, true);
   setHidden(s_answerLabel, true);
@@ -232,12 +230,12 @@ static void showMenu(void) {
   lv_label_set_text(s_optionLabels[0], line0);
   lv_label_set_text(s_optionLabels[1], line1);
   lv_label_set_text(s_hintLabel, "A next  B confirm");
-  lv_obj_invalidate(s_screenAnswerbook);
+  lv_obj_invalidate(s_screenAnswers);
 }
 
 static void showCamera(void) {
   ensurePreviewTask();
-  s_view = ANSWERBOOK_VIEW_CAMERA;
+  s_view = ANSWERS_VIEW_CAMERA;
   setPreviewState(true, false);
   setHidden(s_optionLabels[0], true);
   setHidden(s_optionLabels[1], true);
@@ -246,11 +244,11 @@ static void showCamera(void) {
 
   lv_label_set_text(s_titleLabel, "拍图问事");
   lv_label_set_text(s_hintLabel, "短按A拍摄");
-  lv_obj_invalidate(s_screenAnswerbook);
+  lv_obj_invalidate(s_screenAnswers);
 }
 
 static void showBusy(void) {
-  s_view = ANSWERBOOK_VIEW_BUSY;
+  s_view = ANSWERS_VIEW_BUSY;
   setPreviewState(true, true);
   setHidden(s_optionLabels[0], true);
   setHidden(s_optionLabels[1], true);
@@ -259,11 +257,11 @@ static void showBusy(void) {
 
   lv_label_set_text(s_titleLabel, "拍图问事");
   lv_label_set_text(s_hintLabel, "少女祈福中");
-  lv_obj_invalidate(s_screenAnswerbook);
+  lv_obj_invalidate(s_screenAnswers);
 }
 
 static void showResult(const char *answer, const char *source) {
-  s_view = ANSWERBOOK_VIEW_RESULT;
+  s_view = ANSWERS_VIEW_RESULT;
   setPreviewState(false, false);
   setHidden(s_previewFrame, true);
   setHidden(s_optionLabels[0], true);
@@ -277,34 +275,34 @@ static void showResult(const char *answer, const char *source) {
   lv_label_set_text(s_titleLabel, app_tr(TR_ANSWERBOOK_TITLE));
   lv_label_set_text(s_answerLabel, s_currentAnswer);
   lv_label_set_text(s_hintLabel, s_currentSource);
-  lv_obj_invalidate(s_screenAnswerbook);
+  lv_obj_invalidate(s_screenAnswers);
 }
 
 static void renderCurrentView(void) {
   switch (s_view) {
-    case ANSWERBOOK_VIEW_CAMERA:
+    case ANSWERS_VIEW_CAMERA:
       showCamera();
       break;
-    case ANSWERBOOK_VIEW_BUSY:
+    case ANSWERS_VIEW_BUSY:
       showBusy();
       break;
-    case ANSWERBOOK_VIEW_RESULT:
+    case ANSWERS_VIEW_RESULT:
       showResult(s_currentAnswer, s_currentSource);
       break;
-    case ANSWERBOOK_VIEW_MENU:
+    case ANSWERS_VIEW_MENU:
     default:
       showMenu();
       break;
   }
 }
 
-static void answerbookPreviewTask(void *param) {
+static void answersPreviewTask(void *param) {
   (void)param;
 
   uint8_t bits[CAMERA_PREVIEW_BYTES];
   TickType_t lastWake = xTaskGetTickCount();
   for (;;) {
-    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(ANSWERBOOK_PREVIEW_MS));
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(ANSWERS_PREVIEW_MS));
 
     if (!previewCaptureAllowed() || s_cameraMutex == nullptr) {
       continue;
@@ -319,7 +317,7 @@ static void answerbookPreviewTask(void *param) {
       camera_fb_t *fb = camera_service_capture();
       if (fb != nullptr) {
         ok = camera_service_frame_to_mosaic_preview100(
-            fb, bits, sizeof(bits), ANSWERBOOK_PREVIEW_BLOCK_PX);
+            fb, bits, sizeof(bits), ANSWERS_PREVIEW_BLOCK_PX);
         camera_service_release(fb);
       }
     }
@@ -338,34 +336,42 @@ static void ensurePreviewTask(void) {
   if (!ensureCameraMutex()) {
     return;
   }
-  if (xTaskCreate(answerbookPreviewTask, "abprev",
-                  ANSWERBOOK_PREVIEW_TASK_STACK_BYTES, nullptr, 1,
+  if (xTaskCreate(answersPreviewTask, "abprev",
+                  ANSWERS_PREVIEW_TASK_STACK_BYTES, nullptr, 1,
                   &s_previewTask) != pdPASS) {
     s_previewTask = nullptr;
-    Serial.println("[AnswerBook] preview task create failed");
+    Serial.println("[Answers] preview task create failed");
   }
 }
 
-static OracleResult captureMosaicForAi(uint8_t **outJpeg, size_t *outLen) {
+static uint8_t *allocJpegCopy(size_t len) {
+  uint8_t *copy = static_cast<uint8_t *>(heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (copy == nullptr) {
+    copy = static_cast<uint8_t *>(malloc(len));
+  }
+  return copy;
+}
+
+static VisionResult captureFrameForAi(uint8_t **outJpeg, size_t *outLen) {
   if (outJpeg == nullptr || outLen == nullptr) {
-    return ORACLE_RESULT_CAPTURE_FAIL;
+    return VISION_RESULT_CAPTURE_FAIL;
   }
   *outJpeg = nullptr;
   *outLen = 0;
 
   if (!ensureCameraMutex()) {
-    return ORACLE_RESULT_CAPTURE_FAIL;
+    return VISION_RESULT_CAPTURE_FAIL;
   }
   if (xSemaphoreTake(s_cameraMutex, pdMS_TO_TICKS(1600)) != pdTRUE) {
-    Serial.println("[AnswerBook] camera busy while capture");
-    return ORACLE_RESULT_CAPTURE_FAIL;
+    Serial.println("[Answers] camera busy while capture");
+    return VISION_RESULT_CAPTURE_FAIL;
   }
 
-  OracleResult status = ORACLE_RESULT_CAPTURE_FAIL;
+  VisionResult status = VISION_RESULT_CAPTURE_FAIL;
   camera_fb_t *fb = nullptr;
 
   if (!camera_service_is_ready() && !camera_service_init()) {
-    status = ORACLE_RESULT_NO_CAMERA;
+    status = VISION_RESULT_NO_CAMERA;
   } else {
     camera_fb_t *warmup = camera_service_capture();
     if (warmup != nullptr) {
@@ -374,27 +380,21 @@ static OracleResult captureMosaicForAi(uint8_t **outJpeg, size_t *outLen) {
 
     fb = camera_service_capture();
     if (fb == nullptr || fb->len == 0 ||
-        fb->len > ANSWERBOOK_CAPTURE_MAX_JPEG_BYTES) {
-      Serial.printf("[AnswerBook] capture fail fb=%p len=%u\r\n",
+        fb->len > ANSWERS_CAPTURE_MAX_JPEG_BYTES) {
+      Serial.printf("[Answers] capture fail fb=%p len=%u\r\n",
                     (void *)fb, fb != nullptr ? (unsigned)fb->len : 0U);
-      status = ORACLE_RESULT_CAPTURE_FAIL;
+      status = VISION_RESULT_CAPTURE_FAIL;
     } else {
-      if (!camera_service_frame_to_mosaic_jpeg(
-              fb, ANSWERBOOK_JPEG_BLOCK_PX, ANSWERBOOK_JPEG_QUALITY,
-              outJpeg, outLen)) {
-        Serial.println("[AnswerBook] mosaic jpeg failed");
-        status = ORACLE_RESULT_CAPTURE_FAIL;
-      } else if (*outLen == 0 || *outLen > ANSWERBOOK_CAPTURE_MAX_JPEG_BYTES) {
-        Serial.printf("[AnswerBook] mosaic jpeg invalid len=%u\r\n",
-                      (unsigned)*outLen);
-        free(*outJpeg);
-        *outJpeg = nullptr;
-        *outLen = 0;
-        status = ORACLE_RESULT_CAPTURE_FAIL;
+      uint8_t *copy = allocJpegCopy(fb->len);
+      if (copy == nullptr) {
+        Serial.printf("[Answers] jpeg copy alloc failed len=%u\r\n", (unsigned)fb->len);
+        status = VISION_RESULT_CAPTURE_FAIL;
       } else {
-        Serial.printf("[AnswerBook] mosaic JPEG %u bytes\r\n",
-                      (unsigned)*outLen);
-        status = ORACLE_RESULT_OK;
+        memcpy(copy, fb->buf, fb->len);
+        *outJpeg = copy;
+        *outLen = fb->len;
+        status = VISION_RESULT_OK;
+        Serial.printf("[Answers] JPEG %u bytes captured\r\n", (unsigned)fb->len);
       }
     }
   }
@@ -407,7 +407,7 @@ static OracleResult captureMosaicForAi(uint8_t **outJpeg, size_t *outLen) {
   return status;
 }
 
-static void answerbookAskTask(void *param) {
+static void answersAskTask(void *param) {
   (void)param;
 
   uint8_t *jpeg = nullptr;
@@ -415,9 +415,9 @@ static void answerbookAskTask(void *param) {
   char result[64];
   result[0] = '\0';
 
-  OracleResult code = captureMosaicForAi(&jpeg, &jpegLen);
-  if (code == ORACLE_RESULT_OK && jpeg != nullptr && jpegLen > 0) {
-    code = oracle_service_ask_jpeg(jpeg, jpegLen, result, sizeof(result));
+  VisionResult code = captureFrameForAi(&jpeg, &jpegLen);
+  if (code == VISION_RESULT_OK && jpeg != nullptr && jpegLen > 0) {
+    code = vision_service_book_answer_jpeg(jpeg, jpegLen, result, sizeof(result));
   }
   free(jpeg);
 
@@ -444,34 +444,34 @@ static bool startPhotoCapture(void) {
 
   showBusy();
 
-  if (xTaskCreate(answerbookAskTask, "oracle", ANSWERBOOK_TASK_STACK_BYTES,
+  if (xTaskCreate(answersAskTask, "answers", ANSWERS_TASK_STACK_BYTES,
                   nullptr, 1, &s_askTask) != pdPASS) {
     portENTER_CRITICAL(&s_resultMux);
     s_busy = false;
     s_askTask = nullptr;
     portEXIT_CRITICAL(&s_resultMux);
     showResult(app_tr(TR_VISION_FAIL), "拍图问事");
-    Serial.println("[AnswerBook] task create failed");
+    Serial.println("[Answers] task create failed");
     return true;
   }
 
   return true;
 }
 
-void ui_answerbook_init(void) {
-  s_screenAnswerbook = lv_obj_create(nullptr);
-  lv_obj_set_size(s_screenAnswerbook, 200, 180);
-  lv_obj_set_style_bg_color(s_screenAnswerbook, lv_color_white(), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(s_screenAnswerbook, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_clear_flag(s_screenAnswerbook, LV_OBJ_FLAG_SCROLLABLE);
+void ui_answers_init(void) {
+  s_screenAnswers = lv_obj_create(nullptr);
+  lv_obj_set_size(s_screenAnswers, 200, 180);
+  lv_obj_set_style_bg_color(s_screenAnswers, lv_color_white(), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_screenAnswers, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_clear_flag(s_screenAnswers, LV_OBJ_FLAG_SCROLLABLE);
 
-  s_titleLabel = lv_label_create(s_screenAnswerbook);
+  s_titleLabel = lv_label_create(s_screenAnswers);
   styleLabel(s_titleLabel, UI_FONT_MD);
   lv_obj_set_style_text_align(s_titleLabel, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_align(s_titleLabel, LV_ALIGN_TOP_MID, 0, 8);
 
   for (int i = 0; i < 2; i++) {
-    s_optionLabels[i] = lv_label_create(s_screenAnswerbook);
+    s_optionLabels[i] = lv_label_create(s_screenAnswers);
     styleLabel(s_optionLabels[i], UI_FONT_MD);
     lv_obj_set_style_text_align(s_optionLabels[i], LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
     lv_obj_set_width(s_optionLabels[i], 150);
@@ -479,18 +479,18 @@ void ui_answerbook_init(void) {
     lv_obj_align(s_optionLabels[i], LV_ALIGN_TOP_MID, 0, 58 + i * 34);
   }
 
-  s_answerLabel = lv_label_create(s_screenAnswerbook);
+  s_answerLabel = lv_label_create(s_screenAnswers);
   styleLabel(s_answerLabel, UI_FONT_MD);
   lv_obj_set_style_text_align(s_answerLabel, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_set_width(s_answerLabel, 188);
   lv_label_set_long_mode(s_answerLabel, LV_LABEL_LONG_WRAP);
   lv_obj_align(s_answerLabel, LV_ALIGN_CENTER, 0, -4);
 
-  s_previewFrame = lv_obj_create(s_screenAnswerbook);
-  lv_obj_set_size(s_previewFrame, ANSWERBOOK_PREVIEW_FRAME_SIZE,
-                  ANSWERBOOK_PREVIEW_FRAME_SIZE);
-  lv_obj_set_pos(s_previewFrame, ANSWERBOOK_PREVIEW_FRAME_X,
-                 ANSWERBOOK_PREVIEW_FRAME_Y);
+  s_previewFrame = lv_obj_create(s_screenAnswers);
+  lv_obj_set_size(s_previewFrame, ANSWERS_PREVIEW_FRAME_SIZE,
+                  ANSWERS_PREVIEW_FRAME_SIZE);
+  lv_obj_set_pos(s_previewFrame, ANSWERS_PREVIEW_FRAME_X,
+                 ANSWERS_PREVIEW_FRAME_Y);
   lv_obj_set_style_bg_color(s_previewFrame, lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_previewFrame, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_border_color(s_previewFrame, lv_color_black(), LV_PART_MAIN);
@@ -509,7 +509,7 @@ void ui_answerbook_init(void) {
     clearPreviewCanvas();
   }
 
-  s_hintLabel = lv_label_create(s_screenAnswerbook);
+  s_hintLabel = lv_label_create(s_screenAnswers);
   styleLabel(s_hintLabel, UI_FONT_SM);
   lv_obj_set_style_text_align(s_hintLabel, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_set_width(s_hintLabel, 188);
@@ -519,25 +519,25 @@ void ui_answerbook_init(void) {
   showMenu();
 }
 
-void ui_answerbook_show(void) {
+void ui_answers_show(void) {
   portENTER_CRITICAL(&s_resultMux);
   s_visible = true;
   portEXIT_CRITICAL(&s_resultMux);
-  if (ui_answerbook_is_busy()) {
+  if (ui_answers_is_busy()) {
     showBusy();
   } else {
     showMenu();
   }
-  lv_scr_load(s_screenAnswerbook);
-  lv_obj_invalidate(s_screenAnswerbook);
+  lv_scr_load(s_screenAnswers);
+  lv_obj_invalidate(s_screenAnswers);
 }
 
-void ui_answerbook_leave(void) {
+void ui_answers_leave(void) {
   portENTER_CRITICAL(&s_resultMux);
   s_visible = false;
   portEXIT_CRITICAL(&s_resultMux);
   setPreviewState(false, false);
-  if (!ui_answerbook_is_busy()) {
+  if (!ui_answers_is_busy()) {
     if (s_cameraMutex != nullptr &&
         xSemaphoreTake(s_cameraMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
       camera_service_pause();
@@ -548,41 +548,41 @@ void ui_answerbook_leave(void) {
   }
 }
 
-void ui_answerbook_refresh(void) {
-  if (!ui_answerbook_is_active()) {
+void ui_answers_refresh(void) {
+  if (!ui_answers_is_active()) {
     return;
   }
   renderCurrentView();
 }
 
-void ui_answerbook_refresh_locale(void) {
-  if (!ui_answerbook_is_active()) {
+void ui_answers_refresh_locale(void) {
+  if (!ui_answers_is_active()) {
     return;
   }
   renderCurrentView();
 }
 
-bool ui_answerbook_is_active(void) {
-  return s_screenAnswerbook != nullptr &&
-         lv_scr_act() == s_screenAnswerbook;
+bool ui_answers_is_active(void) {
+  return s_screenAnswers != nullptr &&
+         lv_scr_act() == s_screenAnswers;
 }
 
-bool ui_answerbook_is_busy(void) {
+bool ui_answers_is_busy(void) {
   portENTER_CRITICAL(&s_resultMux);
   const bool busy = s_busy;
   portEXIT_CRITICAL(&s_resultMux);
   return busy;
 }
 
-bool ui_answerbook_next(UiRefreshMode *outRefreshMode) {
+bool ui_answers_next(UiRefreshMode *outRefreshMode) {
   if (outRefreshMode != nullptr) {
     *outRefreshMode = UI_REFRESH_NONE;
   }
-  if (ui_answerbook_is_busy()) {
+  if (ui_answers_is_busy()) {
     return false;
   }
 
-  if (s_view == ANSWERBOOK_VIEW_MENU) {
+  if (s_view == ANSWERS_VIEW_MENU) {
     s_selectedOption = (s_selectedOption + 1U) % 2U;
     showMenu();
     if (outRefreshMode != nullptr) {
@@ -590,14 +590,14 @@ bool ui_answerbook_next(UiRefreshMode *outRefreshMode) {
     }
     return true;
   }
-  if (s_view == ANSWERBOOK_VIEW_CAMERA) {
+  if (s_view == ANSWERS_VIEW_CAMERA) {
     const bool started = startPhotoCapture();
     if (started && outRefreshMode != nullptr) {
       *outRefreshMode = UI_REFRESH_NAV;
     }
     return started;
   }
-  if (s_view == ANSWERBOOK_VIEW_RESULT) {
+  if (s_view == ANSWERS_VIEW_RESULT) {
     showMenu();
     if (outRefreshMode != nullptr) {
       *outRefreshMode = UI_REFRESH_NAV;
@@ -607,15 +607,15 @@ bool ui_answerbook_next(UiRefreshMode *outRefreshMode) {
   return false;
 }
 
-bool ui_answerbook_confirm(UiRefreshMode *outRefreshMode) {
+bool ui_answers_confirm(UiRefreshMode *outRefreshMode) {
   if (outRefreshMode != nullptr) {
     *outRefreshMode = UI_REFRESH_NONE;
   }
-  if (ui_answerbook_is_busy()) {
+  if (ui_answers_is_busy()) {
     return false;
   }
 
-  if (s_view == ANSWERBOOK_VIEW_MENU) {
+  if (s_view == ANSWERS_VIEW_MENU) {
     if (s_selectedOption == 0) {
       showCamera();
     } else {
@@ -626,7 +626,7 @@ bool ui_answerbook_confirm(UiRefreshMode *outRefreshMode) {
     }
     return true;
   }
-  if (s_view == ANSWERBOOK_VIEW_RESULT) {
+  if (s_view == ANSWERS_VIEW_RESULT) {
     showMenu();
     if (outRefreshMode != nullptr) {
       *outRefreshMode = UI_REFRESH_NAV;
@@ -636,20 +636,20 @@ bool ui_answerbook_confirm(UiRefreshMode *outRefreshMode) {
   return false;
 }
 
-bool ui_answerbook_request(void) {
-  return ui_answerbook_confirm(nullptr);
+bool ui_answers_request(void) {
+  return ui_answers_confirm(nullptr);
 }
 
-bool ui_answerbook_service(UiRefreshMode *outRefreshMode) {
+bool ui_answers_service(UiRefreshMode *outRefreshMode) {
   if (outRefreshMode != nullptr) {
     *outRefreshMode = UI_REFRESH_NONE;
   }
-  if (s_screenAnswerbook == nullptr) {
+  if (s_screenAnswers == nullptr) {
     return false;
   }
 
   bool done = false;
-  OracleResult code = ORACLE_RESULT_HTTP_FAIL;
+  VisionResult code = VISION_RESULT_HTTP_FAIL;
   char result[64];
   result[0] = '\0';
 
@@ -663,32 +663,34 @@ bool ui_answerbook_service(UiRefreshMode *outRefreshMode) {
   portEXIT_CRITICAL(&s_resultMux);
 
   if (done) {
-    if (code == ORACLE_RESULT_OK) {
+    if (code == VISION_RESULT_OK) {
       showResult(result, app_tr(TR_ANSWERBOOK_AI_SOURCE));
+    } else if (code == VISION_RESULT_LOCAL_FALLBACK) {
+      showResult(result, app_tr(TR_ANSWERBOOK_LOCAL_SOURCE));
     } else {
-      showResult(answerbookErrorText(code), "拍图问事");
+      showResult(answersErrorText(code), "拍图问事");
     }
     if (outRefreshMode != nullptr) {
       *outRefreshMode = UI_REFRESH_NAV;
     }
-    Serial.printf("[AnswerBook] pipeline done code=%d\r\n", (int)code);
-    return ui_answerbook_is_active();
+    Serial.printf("[Answers] pipeline done code=%d\r\n", (int)code);
+    return ui_answers_is_active();
   }
 
-  if (ui_answerbook_is_active() && s_view == ANSWERBOOK_VIEW_CAMERA &&
-      !ui_answerbook_is_busy()) {
+  if (ui_answers_is_active() && s_view == ANSWERS_VIEW_CAMERA &&
+      !ui_answers_is_busy()) {
     if (!consumePreviewFrame()) {
       return false;
     }
     if (outRefreshMode != nullptr) {
       *outRefreshMode = UI_REFRESH_FAST;
     }
-    return ui_answerbook_is_active();
+    return ui_answers_is_active();
   }
 
   return false;
 }
 
-lv_obj_t *ui_answerbook_get_screen(void) {
-  return s_screenAnswerbook;
+lv_obj_t *ui_answers_get_screen(void) {
+  return s_screenAnswers;
 }
