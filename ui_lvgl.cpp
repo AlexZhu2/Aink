@@ -3,6 +3,7 @@
 #include "epaper_canvas.h"
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 
 /* Must be before lvgl.h so the sketch lv_conf.h is used (not library defaults). */
 #define LV_CONF_INCLUDE_SIMPLE
@@ -14,7 +15,7 @@
 #define UI_DRAW_BUF_PIXELS (UI_MAIN_WIDTH * UI_MAIN_HEIGHT)
 
 static lv_disp_draw_buf_t s_drawBuf;
-static lv_color_t s_buf1[UI_DRAW_BUF_PIXELS];
+static lv_color_t *s_buf1 = nullptr;
 static lv_disp_drv_t s_dispDrv;
 static lv_disp_t *s_display = nullptr;
 static uint32_t s_lastTickMs = 0;
@@ -49,6 +50,23 @@ static void lvgl_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_col
 
 void ui_lvgl_init(void) {
   lv_init();
+  if (s_buf1 == nullptr) {
+    const size_t bufBytes = sizeof(lv_color_t) * UI_DRAW_BUF_PIXELS;
+    s_buf1 = static_cast<lv_color_t *>(heap_caps_malloc(bufBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (s_buf1 == nullptr) {
+      s_buf1 = static_cast<lv_color_t *>(heap_caps_malloc(bufBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    if (s_buf1 == nullptr) {
+      Serial.printf("[LVGL] draw buffer alloc failed bytes=%u\n", (unsigned)bufBytes);
+      return;
+    }
+    Serial.printf("[LVGL] draw buffer %u bytes in %s heap=%u psram=%u block=%u\n",
+                  (unsigned)bufBytes,
+                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM/heap" : "heap",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  }
   lv_disp_draw_buf_init(&s_drawBuf, s_buf1, nullptr, UI_DRAW_BUF_PIXELS);
   lv_disp_drv_init(&s_dispDrv);
   s_dispDrv.hor_res = UI_MAIN_WIDTH;

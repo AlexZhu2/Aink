@@ -2,6 +2,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
+#include <esp_heap_caps.h>
 #include <time.h>
 #include "EPD_1in54_V2.h"
 #include "weather_icons.h"
@@ -15,6 +16,7 @@
 #include "ui_stock.h"
 #include "ui_settings.h"
 #include "ui_nav.h"
+#include "ui_answers.h"
 #include "ui_vision.h"
 #include "ui_voice.h"
 #include "ui_clock.h"
@@ -961,6 +963,7 @@ static void startNormalOperation() {
   ui_home_init();
   ui_weather_init();
   ui_stock_init();
+  ui_answers_init();
   ui_vision_init();
   ui_voice_init();
   ui_clock_init();
@@ -1331,6 +1334,15 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n=== Aink ===");
+  if (psramFound()) {
+    heap_caps_malloc_extmem_enable(4096);
+    Serial.printf("[Heap] PSRAM enabled, malloc>=4096 to extmem heap=%u psram=%u block=%u\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  } else {
+    Serial.println("[Heap] PSRAM not found");
+  }
 
   DEV_Module_Init();
 
@@ -1371,12 +1383,24 @@ void loop() {
         (void)ui_vision_run_capture();
         requestDisplayRefresh(UI_REFRESH_NAV);
       }
+      if (ui_answers_consume_capture_request()) {
+        serviceDisplayRefresh(true);
+        Serial.println("[Answers] capture pipeline starting (async)");
+        Serial.flush();
+        (void)ui_answers_run_capture();
+        requestDisplayRefresh(UI_REFRESH_NAV);
+      }
     }
   }
 
   UiRefreshMode visionMode = UI_REFRESH_NONE;
   if (ui_vision_service(&visionMode)) {
     requestDisplayRefresh(visionMode);
+  }
+
+  UiRefreshMode answersMode = UI_REFRESH_NONE;
+  if (ui_answers_service(&answersMode)) {
+    requestDisplayRefresh(answersMode);
   }
 
   UiRefreshMode voiceMode = UI_REFRESH_NONE;
@@ -1418,13 +1442,15 @@ void loop() {
   const bool inputIdle = lastUserInputMs == 0 ||
                          (millis() - lastUserInputMs) >= NETWORK_IDLE_AFTER_INPUT_MS;
   const bool visionIdle = !ui_vision_is_busy();
+  const bool answersIdle = !ui_answers_is_busy();
   const bool voiceIdle = !voiceBusy;
   serviceNetworkStateMachine(displayBootState == DISPLAY_BOOT_READY &&
                              !displayRefreshPending &&
                              !epaper_upload_active() &&
                              inputIdle &&
                              visionIdle &&
+                             answersIdle &&
                              voiceIdle);
-  serviceStockNameRetry(wifiConnected, inputIdle && visionIdle && voiceIdle);
+  serviceStockNameRetry(wifiConnected, inputIdle && visionIdle && answersIdle && voiceIdle);
   delay(50);
 }
