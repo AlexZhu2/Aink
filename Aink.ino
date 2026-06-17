@@ -1604,13 +1604,20 @@ void loop() {
 
   const bool voiceBusy = voice_service_is_busy();
   const VoiceState voiceState = voice_service_state();
-  if (!voiceBusy || voiceState == VOICE_STATE_RECORDING) {
+  const bool answersBusy = ui_answers_is_busy();
+  const bool voiceScreenActive = ui_voice_is_active();
+  const bool voiceCanRefresh =
+      voiceState == VOICE_STATE_RECORDING ||
+      (voiceScreenActive &&
+       (voiceState == VOICE_STATE_THINKING ||
+        voiceState == VOICE_STATE_SPEAKING));
+  if (!voiceBusy || voiceCanRefresh || answersBusy) {
     serviceDisplayRefresh(false);
   }
   const bool inputIdle = lastUserInputMs == 0 ||
                          (millis() - lastUserInputMs) >= NETWORK_IDLE_AFTER_INPUT_MS;
   const bool visionIdle = !ui_vision_is_busy();
-  const bool answersIdle = !ui_answers_is_busy();
+  const bool answersIdle = !answersBusy;
   const bool voiceIdle = !voiceBusy;
   serviceNetworkStateMachine(displayBootState == DISPLAY_BOOT_READY &&
                              !displayRefreshPending &&
