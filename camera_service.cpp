@@ -8,9 +8,27 @@
 
 #include <Arduino.h>
 #include <esp32-hal-ledc.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <string.h>
 
 static bool s_ready = false;
+static StaticSemaphore_t s_cameraMutexStorage;
+static SemaphoreHandle_t s_cameraMutex = nullptr;
+static portMUX_TYPE s_cameraMutexMux = portMUX_INITIALIZER_UNLOCKED;
+
+static bool ensureCameraMutex(void) {
+  if (s_cameraMutex != nullptr) {
+    return true;
+  }
+
+  portENTER_CRITICAL(&s_cameraMutexMux);
+  if (s_cameraMutex == nullptr) {
+    s_cameraMutex = xSemaphoreCreateMutexStatic(&s_cameraMutexStorage);
+  }
+  portEXIT_CRITICAL(&s_cameraMutexMux);
+  return s_cameraMutex != nullptr;
+}
 
 static void setupLedFlash(int pin) {
 #if defined(LED_GPIO_NUM)
@@ -45,12 +63,12 @@ static camera_config_t buildDefaultConfig(bool usePsram) {
   config.frame_size = FRAMESIZE_240X240;
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  config.jpeg_quality = 12;
+  config.jpeg_quality = 24;
   config.fb_count = 1;
   config.fb_location = usePsram ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
   if (usePsram) {
-    config.jpeg_quality = 10;
+    config.jpeg_quality = 24;
     /* Snapshot use: one buffer, stop when full — avoids FB-OVF while CPU is busy (HTTP). */
     config.fb_count = 1;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
@@ -80,10 +98,11 @@ bool camera_service_init(void) {
   }
 
   const bool hasPsram = psramFound();
-  Serial.printf("[Camera] PSRAM=%s freeHeap=%u freePsram=%u\r\n",
+  Serial.printf("[Camera] PSRAM=%s heap=%u psram=%u block=%u\r\n",
                 hasPsram ? "yes" : "no",
-                (unsigned)ESP.getFreeHeap(),
-                (unsigned)ESP.getFreePsram());
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
   camera_config_t config = buildDefaultConfig(hasPsram);
   esp_err_t err = esp_camera_init(&config);
@@ -113,6 +132,21 @@ bool camera_service_init(void) {
 
 bool camera_service_is_ready(void) {
   return s_ready;
+}
+
+bool camera_service_lock(uint32_t timeoutMs) {
+  if (!ensureCameraMutex()) {
+    return false;
+  }
+
+  const TickType_t ticks = timeoutMs == 0 ? 0 : pdMS_TO_TICKS(timeoutMs);
+  return xSemaphoreTake(s_cameraMutex, ticks) == pdTRUE;
+}
+
+void camera_service_unlock(void) {
+  if (s_cameraMutex != nullptr) {
+    xSemaphoreGive(s_cameraMutex);
+  }
 }
 
 void camera_service_pause(void) {

@@ -82,12 +82,12 @@ static const char *describe_user_prompt(void) {
 }
 
 static const char *book_system_prompt(void) {
-  return "你正在模仿《答案之书》。根据这张经过隐私混淆的照片，给出一句中文短答。"
-         "不超过20个汉字，只输出答案正文，不要解释、不要标点堆叠、不要引号。";
+  return "你是一个中文短答生成器。根据这张经过隐私混淆的照片，输出一句像签语一样的中文答案。"
+         "只输出答案本身，6到14个汉字，不要英文、不要书名、不要应用名、不要标题、不要解释、不要引号。";
 }
 
 static const char *book_user_prompt(void) {
-  return "Based on this image, imitate a Book of Answers response. Keep it under 20 Chinese characters.";
+  return "只返回一句简体中文短答。不要返回任何标题、书名、应用名或英文。";
 }
 
 static bool encodeBase64(const uint8_t *data, size_t dataLen, char **outB64, size_t *outLen) {
@@ -146,10 +146,12 @@ static bool httpPostJson(const char *url, const char *authHeader, const char *au
       dnsOk = WiFi.hostByName(host, serverIp);
     }
   }
-  Serial.printf("[Vision] HTTP POST %u bytes to %s (heap=%u psram=%u block=%u dns=%s)\r\n",
+  Serial.printf("[Vision] HTTP POST %u bytes to %s (heap=%u psram=%u block=%u dma=%u dns=%s)\r\n",
                 (unsigned)bodyLen, url,
-                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram(),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
                 dnsOk ? serverIp.toString().c_str() : "fail");
   if (ESP.getFreePsram() == 0) {
     Serial.println("[Vision] warn: PSRAM=0, enable OPI PSRAM in board settings");
@@ -190,9 +192,11 @@ static bool httpPostJson(const char *url, const char *authHeader, const char *au
     *outResponse = http.errorToString(*outHttpCode);
     char sslError[120];
     const int sslCode = client.lastError(sslError, sizeof(sslError));
-    Serial.printf("[Vision] POST fail heap=%u block=%u err=%s\r\n",
-                  (unsigned)ESP.getFreeHeap(),
+    Serial.printf("[Vision] POST fail heap=%u psram=%u block=%u dma=%u err=%s\r\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
                   outResponse->c_str());
     Serial.printf("[Vision] TLS lastError=%d %s\r\n", sslCode, sslError);
   }
@@ -335,6 +339,57 @@ static void truncateVisionOutput(char *text, size_t maxChars) {
     chars++;
   }
   text[i] = '\0';
+}
+
+static bool containsAsciiIgnoreCase(const char *text, const char *needle) {
+  if (text == nullptr || needle == nullptr || needle[0] == '\0') {
+    return false;
+  }
+
+  for (const char *p = text; *p != '\0'; p++) {
+    const char *a = p;
+    const char *b = needle;
+    while (*a != '\0' && *b != '\0') {
+      char ca = *a;
+      char cb = *b;
+      if (ca >= 'A' && ca <= 'Z') {
+        ca = (char)(ca - 'A' + 'a');
+      }
+      if (cb >= 'A' && cb <= 'Z') {
+        cb = (char)(cb - 'A' + 'a');
+      }
+      if (ca != cb) {
+        break;
+      }
+      a++;
+      b++;
+    }
+    if (*b == '\0') {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool bookAnswerLooksLikeTitle(const char *text) {
+  if (text == nullptr || text[0] == '\0') {
+    return true;
+  }
+  if (containsAsciiIgnoreCase(text, "book of answers") ||
+      containsAsciiIgnoreCase(text, "the book of answers") ||
+      strstr(text, "答案之书") != nullptr ||
+      strstr(text, "答案书") != nullptr) {
+    return true;
+  }
+
+  bool hasChinese = false;
+  for (const unsigned char *p = reinterpret_cast<const unsigned char *>(text); *p != '\0'; p++) {
+    if (*p >= 0xE0) {
+      hasChinese = true;
+      break;
+    }
+  }
+  return !hasChinese;
 }
 
 static void normalizeVisionOutput(const char *content, const char *reasoning,
@@ -828,6 +883,64 @@ static uint32_t mixObfuscationSeed(uint32_t seed, uint32_t value) {
   return seed;
 }
 
+static bool isJpegSofMarker(uint8_t marker) {
+  return marker == 0xC0 || marker == 0xC1 || marker == 0xC2 || marker == 0xC3 ||
+         marker == 0xC5 || marker == 0xC6 || marker == 0xC7 ||
+         marker == 0xC9 || marker == 0xCA || marker == 0xCB ||
+         marker == 0xCD || marker == 0xCE || marker == 0xCF;
+}
+
+static bool readJpegDimensions(const uint8_t *jpeg, size_t jpegLen,
+                               uint16_t *outWidth, uint16_t *outHeight) {
+  if (jpeg == nullptr || jpegLen < 4 || outWidth == nullptr || outHeight == nullptr) {
+    return false;
+  }
+  if (jpeg[0] != 0xFF || jpeg[1] != 0xD8) {
+    return false;
+  }
+
+  size_t pos = 2;
+  while (pos + 4 < jpegLen) {
+    while (pos < jpegLen && jpeg[pos] != 0xFF) {
+      pos++;
+    }
+    while (pos < jpegLen && jpeg[pos] == 0xFF) {
+      pos++;
+    }
+    if (pos >= jpegLen) {
+      break;
+    }
+
+    const uint8_t marker = jpeg[pos++];
+    if (marker == 0xD9 || marker == 0xDA) {
+      break;
+    }
+    if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+      continue;
+    }
+    if (pos + 2 > jpegLen) {
+      return false;
+    }
+
+    const uint16_t segLen = ((uint16_t)jpeg[pos] << 8) | jpeg[pos + 1];
+    if (segLen < 2 || pos + segLen > jpegLen) {
+      return false;
+    }
+
+    if (isJpegSofMarker(marker)) {
+      if (segLen < 7) {
+        return false;
+      }
+      *outHeight = ((uint16_t)jpeg[pos + 3] << 8) | jpeg[pos + 4];
+      *outWidth = ((uint16_t)jpeg[pos + 5] << 8) | jpeg[pos + 6];
+      return *outWidth > 0 && *outHeight > 0;
+    }
+
+    pos += segLen;
+  }
+  return false;
+}
+
 static bool obfuscateJpegForBook(const uint8_t *jpeg, size_t jpegLen,
                                  uint8_t **outJpeg, size_t *outLen) {
   if (jpeg == nullptr || outJpeg == nullptr || outLen == nullptr) {
@@ -836,14 +949,22 @@ static bool obfuscateJpegForBook(const uint8_t *jpeg, size_t jpegLen,
   *outJpeg = nullptr;
   *outLen = 0;
 
-  const size_t rgbSize = (size_t)VISION_CAMERA_FRAME_WIDTH *
-                         (size_t)VISION_CAMERA_FRAME_HEIGHT * 3U;
+  uint16_t jpegWidth = 0;
+  uint16_t jpegHeight = 0;
+  if (!readJpegDimensions(jpeg, jpegLen, &jpegWidth, &jpegHeight) ||
+      jpegWidth > VISION_CAMERA_FRAME_WIDTH ||
+      jpegHeight > VISION_CAMERA_FRAME_HEIGHT) {
+    Serial.printf("[Vision] book invalid jpeg dimensions %ux%u\r\n",
+                  (unsigned)jpegWidth, (unsigned)jpegHeight);
+    return false;
+  }
+
+  const int frameW = (int)jpegWidth;
+  const int frameH = (int)jpegHeight;
+  const size_t rgbSize = (size_t)frameW * (size_t)frameH * 3U;
   uint8_t *rgb = static_cast<uint8_t *>(heap_caps_malloc(rgbSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (rgb == nullptr) {
-    rgb = static_cast<uint8_t *>(malloc(rgbSize));
-  }
-  if (rgb == nullptr) {
-    Serial.println("[Vision] book obfuscation rgb alloc failed");
+    Serial.printf("[Vision] book obfuscation PSRAM alloc failed size=%u\r\n", (unsigned)rgbSize);
     return false;
   }
 
@@ -858,18 +979,18 @@ static bool obfuscateJpegForBook(const uint8_t *jpeg, size_t jpegLen,
     seed = mixObfuscationSeed(seed, jpeg[i]);
   }
 
-  for (int by = 0; by < VISION_CAMERA_FRAME_HEIGHT; by += VISION_BOOK_OBFUSCATE_BLOCK_PX) {
-    for (int bx = 0; bx < VISION_CAMERA_FRAME_WIDTH; bx += VISION_BOOK_OBFUSCATE_BLOCK_PX) {
+  for (int by = 0; by < frameH; by += VISION_BOOK_OBFUSCATE_BLOCK_PX) {
+    for (int bx = 0; bx < frameW; bx += VISION_BOOK_OBFUSCATE_BLOCK_PX) {
       uint32_t rSum = 0;
       uint32_t gSum = 0;
       uint32_t bSum = 0;
       uint32_t count = 0;
-      const int yEnd = min(by + VISION_BOOK_OBFUSCATE_BLOCK_PX, VISION_CAMERA_FRAME_HEIGHT);
-      const int xEnd = min(bx + VISION_BOOK_OBFUSCATE_BLOCK_PX, VISION_CAMERA_FRAME_WIDTH);
+      const int yEnd = min(by + VISION_BOOK_OBFUSCATE_BLOCK_PX, frameH);
+      const int xEnd = min(bx + VISION_BOOK_OBFUSCATE_BLOCK_PX, frameW);
 
       for (int y = by; y < yEnd; y++) {
         for (int x = bx; x < xEnd; x++) {
-          const size_t idx = ((size_t)y * VISION_CAMERA_FRAME_WIDTH + (size_t)x) * 3U;
+          const size_t idx = ((size_t)y * frameW + (size_t)x) * 3U;
           rSum += rgb[idx];
           gSum += rgb[idx + 1];
           bSum += rgb[idx + 2];
@@ -892,7 +1013,7 @@ static bool obfuscateJpegForBook(const uint8_t *jpeg, size_t jpegLen,
 
       for (int y = by; y < yEnd; y++) {
         for (int x = bx; x < xEnd; x++) {
-          const size_t idx = ((size_t)y * VISION_CAMERA_FRAME_WIDTH + (size_t)x) * 3U;
+          const size_t idx = ((size_t)y * frameW + (size_t)x) * 3U;
           rgb[idx] = shade;
           rgb[idx + 1] = shade;
           rgb[idx + 2] = shade;
@@ -904,8 +1025,7 @@ static bool obfuscateJpegForBook(const uint8_t *jpeg, size_t jpegLen,
   uint8_t *encoded = nullptr;
   size_t encodedLen = 0;
   const bool ok = fmt2jpg(rgb, rgbSize,
-                          VISION_CAMERA_FRAME_WIDTH, VISION_CAMERA_FRAME_HEIGHT,
-                          PIXFORMAT_RGB888, 24, &encoded, &encodedLen);
+                          frameW, frameH, PIXFORMAT_RGB888, 35, &encoded, &encodedLen);
   free(rgb);
 
   if (!ok || encoded == nullptr || encodedLen == 0 || encodedLen > VISION_MAX_JPEG_BYTES) {
@@ -1028,6 +1148,13 @@ VisionResult vision_service_book_answer_jpeg(const uint8_t *jpeg, size_t jpegLen
     return VISION_RESULT_OK;
   }
 
+  trimVisionOutput(outText);
+  if (bookAnswerLooksLikeTitle(outText)) {
+    Serial.printf("[Vision] book title-like answer '%s', using local answer\r\n", outText);
+    chooseBookFallbackAnswer(outText, outLen);
+    return VISION_RESULT_OK;
+  }
+
   truncateVisionOutput(outText, VISION_BOOK_OUTPUT_MAX_CHARS);
   Serial.printf("[Vision] book answer %s\r\n", outText);
   return VISION_RESULT_OK;
@@ -1042,11 +1169,6 @@ VisionResult vision_service_describe_camera(char *outText, size_t outLen) {
   Serial.println("[Vision] describe start");
   Serial.flush();
 
-  if (!camera_service_is_ready() && !camera_service_init()) {
-    Serial.println("[Vision] no camera");
-    return VISION_RESULT_NO_CAMERA;
-  }
-
   char apiKey[129];
   const char *model = nullptr;
   AiProvider provider = AI_PROVIDER_OPENAI;
@@ -1055,37 +1177,71 @@ VisionResult vision_service_describe_camera(char *outText, size_t outLen) {
     return ready;
   }
 
-  Serial.println("[Vision] capturing frame...");
-  Serial.flush();
-
-  camera_fb_t *warmup = camera_service_capture();
-  if (warmup != nullptr) {
-    camera_service_release(warmup);
-  }
-
-  camera_fb_t *fb = camera_service_capture();
-  if (fb == nullptr || fb->len == 0 || fb->len > VISION_MAX_JPEG_BYTES) {
-    Serial.printf("[Vision] capture fail fb=%p len=%u\r\n",
-                  (void *)fb, fb != nullptr ? (unsigned)fb->len : 0U);
-    camera_service_release(fb);
+  if (!camera_service_lock(1600)) {
+    Serial.println("[Vision] camera busy while capture");
     return VISION_RESULT_CAPTURE_FAIL;
   }
 
-  Serial.printf("[Vision] JPEG %u bytes, encoding b64...\r\n", (unsigned)fb->len);
+  Serial.println("[Vision] capturing frame...");
+  Serial.flush();
+
+  VisionResult captureStatus = VISION_RESULT_CAPTURE_FAIL;
+  camera_fb_t *fb = nullptr;
+  uint8_t *jpegCopy = nullptr;
+  size_t jpegLen = 0;
+
+  if (!camera_service_is_ready() && !camera_service_init()) {
+    Serial.println("[Vision] no camera");
+    captureStatus = VISION_RESULT_NO_CAMERA;
+  } else {
+    camera_fb_t *warmup = camera_service_capture();
+    if (warmup != nullptr) {
+      camera_service_release(warmup);
+    }
+
+    fb = camera_service_capture();
+    if (fb == nullptr || fb->len == 0 || fb->len > VISION_MAX_JPEG_BYTES) {
+      Serial.printf("[Vision] capture fail fb=%p len=%u\r\n",
+                    (void *)fb, fb != nullptr ? (unsigned)fb->len : 0U);
+      captureStatus = VISION_RESULT_CAPTURE_FAIL;
+    } else {
+      jpegCopy = static_cast<uint8_t *>(heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+      if (jpegCopy == nullptr) {
+        jpegCopy = static_cast<uint8_t *>(malloc(fb->len));
+      }
+      if (jpegCopy == nullptr) {
+        Serial.printf("[Vision] jpeg copy alloc failed len=%u\r\n", (unsigned)fb->len);
+        captureStatus = VISION_RESULT_CAPTURE_FAIL;
+      } else {
+        memcpy(jpegCopy, fb->buf, fb->len);
+        jpegLen = fb->len;
+        captureStatus = VISION_RESULT_OK;
+      }
+    }
+  }
+
+  if (fb != nullptr) {
+    camera_service_release(fb);
+  }
+  camera_service_pause();
+  camera_service_unlock();
+
+  if (captureStatus != VISION_RESULT_OK) {
+    free(jpegCopy);
+    return captureStatus;
+  }
+
+  Serial.printf("[Vision] JPEG %u bytes, encoding b64...\r\n", (unsigned)jpegLen);
   Serial.flush();
 
   char *base64 = nullptr;
   size_t base64Len = 0;
-  const size_t jpegLen = fb->len;
-  if (!encodeBase64(fb->buf, fb->len, &base64, &base64Len)) {
+  if (!encodeBase64(jpegCopy, jpegLen, &base64, &base64Len)) {
+    free(jpegCopy);
     Serial.println("[Vision] base64 encode failed");
-    camera_service_release(fb);
     return VISION_RESULT_CAPTURE_FAIL;
   }
-  camera_service_release(fb);
-
-  /* Camera keeps streaming after init; pause during HTTPS or FB-OVF floods serial. */
-  camera_service_pause();
+  free(jpegCopy);
 
   Serial.printf("[Vision] b64 %u bytes, provider=%s model=%s, posting...\r\n",
                 (unsigned)base64Len, ai_provider_name(provider), model);

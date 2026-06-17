@@ -2,6 +2,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
+#include <esp_heap_caps.h>
 #include <time.h>
 #include "EPD_1in54_V2.h"
 #include "weather_icons.h"
@@ -1312,6 +1313,15 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n=== Aink ===");
+  if (psramFound()) {
+    heap_caps_malloc_extmem_enable(4096);
+    Serial.printf("[Heap] PSRAM enabled, malloc>=4096 to extmem heap=%u psram=%u block=%u\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  } else {
+    Serial.println("[Heap] PSRAM not found");
+  }
 
   DEV_Module_Init();
 

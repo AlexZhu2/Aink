@@ -18,8 +18,11 @@
 #define LV_DISP_DEF_REFR_PERIOD 1000
 #define LV_DPI_DEF         130
 
-#define LV_MEM_CUSTOM      0
-#define LV_MEM_SIZE        (48U * 1024U)
+#define LV_MEM_CUSTOM      1
+#define LV_MEM_CUSTOM_INCLUDE "lvgl_memory.h"
+#define LV_MEM_CUSTOM_ALLOC   lvgl_psram_malloc
+#define LV_MEM_CUSTOM_FREE    lvgl_psram_free
+#define LV_MEM_CUSTOM_REALLOC lvgl_psram_realloc
 
 #define LV_USE_LOG         0
 

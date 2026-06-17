@@ -8,7 +8,6 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <stdio.h>
 #include <string.h>
@@ -25,7 +24,6 @@ static bool s_captureRequested = false;
 static bool s_busy = false;
 static bool s_answerOnlyVisible = false;
 static TaskHandle_t s_captureTask = nullptr;
-static SemaphoreHandle_t s_cameraMutex = nullptr;
 static portMUX_TYPE s_captureMux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_captureRunning = false;
 static bool s_captureDone = false;
@@ -86,19 +84,6 @@ static void build_waiting_text(char *out, size_t outLen, uint8_t dots) {
       zh ? (dots == 1 ? "。" : (dots == 2 ? "。。" : "。。。"))
          : (dots == 1 ? "." : (dots == 2 ? ".." : "..."));
   snprintf(out, outLen, "%s%s", prefix, suffix);
-}
-
-static bool ensure_camera_mutex(void) {
-  if (s_cameraMutex != nullptr) {
-    return true;
-  }
-
-  s_cameraMutex = xSemaphoreCreateMutex();
-  if (s_cameraMutex == nullptr) {
-    Serial.println("[Answers] camera mutex create failed");
-    return false;
-  }
-  return true;
 }
 
 static void apply_final_answer_layout(bool answerOnly) {
@@ -163,11 +148,7 @@ static VisionResult capture_frame_for_answer(uint8_t **outJpeg, size_t *outLen) 
   *outJpeg = nullptr;
   *outLen = 0;
 
-  if (!ensure_camera_mutex()) {
-    return VISION_RESULT_CAPTURE_FAIL;
-  }
-
-  if (xSemaphoreTake(s_cameraMutex, pdMS_TO_TICKS(1600)) != pdTRUE) {
+  if (!camera_service_lock(1600)) {
     Serial.println("[Answers] camera busy while capture");
     return VISION_RESULT_CAPTURE_FAIL;
   }
@@ -208,7 +189,7 @@ static VisionResult capture_frame_for_answer(uint8_t **outJpeg, size_t *outLen) 
   }
 
   camera_service_pause();
-  xSemaphoreGive(s_cameraMutex);
+  camera_service_unlock();
   return status;
 }
 
@@ -294,13 +275,9 @@ void ui_answers_show(void) {
 
 void ui_answers_leave(void) {
   if (!capture_running()) {
-    if (s_cameraMutex != nullptr) {
-      if (xSemaphoreTake(s_cameraMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
-        camera_service_pause();
-        xSemaphoreGive(s_cameraMutex);
-      }
-    } else {
+    if (camera_service_lock(300)) {
       camera_service_pause();
+      camera_service_unlock();
     }
   }
 }

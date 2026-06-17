@@ -8,7 +8,6 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <stdio.h>
 #include <string.h>
@@ -33,7 +32,6 @@ static bool s_captureRequested = false;
 static bool s_busy = false;
 static TaskHandle_t s_captureTask = nullptr;
 static TaskHandle_t s_previewTask = nullptr;
-static SemaphoreHandle_t s_cameraMutex = nullptr;
 static portMUX_TYPE s_captureMux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_captureRunning = false;
 static bool s_captureDone = false;
@@ -102,19 +100,6 @@ static void copy_text(char *dst, size_t dstLen, const char *src) {
     i++;
   }
   dst[i] = '\0';
-}
-
-static bool ensure_camera_mutex(void) {
-  if (s_cameraMutex != nullptr) {
-    return true;
-  }
-
-  s_cameraMutex = xSemaphoreCreateMutex();
-  if (s_cameraMutex == nullptr) {
-    Serial.println("[Vision] camera mutex create failed");
-    return false;
-  }
-  return true;
 }
 
 static bool ensure_preview_buffer(void) {
@@ -247,11 +232,11 @@ static void vision_preview_task(void *param) {
   for (;;) {
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(VISION_PREVIEW_MS));
 
-    if (!preview_capture_allowed() || s_cameraMutex == nullptr) {
+    if (!preview_capture_allowed()) {
       continue;
     }
 
-    if (xSemaphoreTake(s_cameraMutex, pdMS_TO_TICKS(30)) != pdTRUE) {
+    if (!camera_service_lock(30)) {
       continue;
     }
 
@@ -264,7 +249,8 @@ static void vision_preview_task(void *param) {
       }
     }
 
-    xSemaphoreGive(s_cameraMutex);
+    camera_service_pause();
+    camera_service_unlock();
 
     if (ok) {
       store_preview_bits(bits, false);
@@ -274,9 +260,6 @@ static void vision_preview_task(void *param) {
 
 static void ensure_preview_task(void) {
   if (s_previewTask != nullptr) {
-    return;
-  }
-  if (!ensure_camera_mutex()) {
     return;
   }
 
@@ -302,11 +285,7 @@ static VisionResult capture_frame_for_ai(uint8_t **outJpeg, size_t *outLen) {
   *outJpeg = nullptr;
   *outLen = 0;
 
-  if (!ensure_camera_mutex()) {
-    return VISION_RESULT_CAPTURE_FAIL;
-  }
-
-  if (xSemaphoreTake(s_cameraMutex, pdMS_TO_TICKS(1600)) != pdTRUE) {
+  if (!camera_service_lock(1600)) {
     Serial.println("[Vision] camera busy while capture");
     return VISION_RESULT_CAPTURE_FAIL;
   }
@@ -346,7 +325,7 @@ static VisionResult capture_frame_for_ai(uint8_t **outJpeg, size_t *outLen) {
   }
 
   camera_service_pause();
-  xSemaphoreGive(s_cameraMutex);
+  camera_service_unlock();
 
   if (status == VISION_RESULT_OK && previewOk) {
     apply_preview_bits(previewBits);
@@ -464,13 +443,9 @@ void ui_vision_show(void) {
 void ui_vision_leave(void) {
   set_preview_state(false, false);
   if (!capture_running()) {
-    if (s_cameraMutex != nullptr) {
-      if (xSemaphoreTake(s_cameraMutex, pdMS_TO_TICKS(300)) == pdTRUE) {
-        camera_service_pause();
-        xSemaphoreGive(s_cameraMutex);
-      }
-    } else {
+    if (camera_service_lock(300)) {
       camera_service_pause();
+      camera_service_unlock();
     }
   }
 }
@@ -518,6 +493,10 @@ bool ui_vision_consume_capture_request(void) {
 void ui_vision_set_busy(void) {
   s_busy = true;
   set_preview_state(true, true);
+  if (camera_service_lock(300)) {
+    camera_service_pause();
+    camera_service_unlock();
+  }
   s_waitAnimDots = 1;
   s_waitAnimLastMs = millis();
   lv_label_set_text(s_titleLabel, app_tr(TR_VISION_TITLE));
