@@ -13,6 +13,8 @@
 #define WIFI_ICON_H       9
 #define BATTERY_ICON_W    15
 #define BATTERY_ICON_H    8
+#define STATUS_WIFI_ICON_Y    4
+#define STATUS_WEATHER_ICON_Y 0
 
 static lv_obj_t *s_bar = nullptr;
 static lv_obj_t *s_wifiCanvas = nullptr;
@@ -163,7 +165,7 @@ void ui_status_bar_init(void) {
   s_wifiCanvas = lv_canvas_create(s_bar);
   lv_canvas_set_buffer(s_wifiCanvas, s_wifiBuf, WIFI_ICON_W, WIFI_ICON_H,
                        LV_IMG_CF_TRUE_COLOR);
-  lv_obj_set_pos(s_wifiCanvas, 2, 6);
+  lv_obj_set_pos(s_wifiCanvas, 2, STATUS_WIFI_ICON_Y);
 
   s_dateLabel = lv_label_create(s_bar);
   styleStatusText(s_dateLabel);
@@ -174,7 +176,7 @@ void ui_status_bar_init(void) {
   s_weatherCanvas = lv_canvas_create(s_bar);
   lv_canvas_set_buffer(s_weatherCanvas, s_weatherBuf, WEATHER_ICON_SIZE,
                        WEATHER_ICON_SIZE, LV_IMG_CF_TRUE_COLOR);
-  lv_obj_set_pos(s_weatherCanvas, 118, 1);
+  lv_obj_set_pos(s_weatherCanvas, 118, STATUS_WEATHER_ICON_Y);
 
   s_tempLabel = lv_label_create(s_bar);
   styleStatusText(s_tempLabel);
@@ -196,6 +198,18 @@ void ui_status_bar_init(void) {
   lv_obj_clear_flag(s_divider, LV_OBJ_FLAG_SCROLLABLE);
 
   ui_status_bar_update(-1, false, false, WEATHER_ICON_CLOUDY, 0);
+}
+
+void ui_status_bar_set_visible(bool visible) {
+  if (s_bar == nullptr) {
+    return;
+  }
+  if (visible) {
+    lv_obj_clear_flag(s_bar, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(s_bar, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_invalidate(s_bar);
 }
 
 void ui_status_bar_update(int batteryPercent, bool wifiConnected,

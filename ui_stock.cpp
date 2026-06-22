@@ -16,7 +16,7 @@
 #define STOCK_DETAIL_RETRY_MS    (60UL * 1000UL)
 
 #define STOCK_ARROW_PX     10
-#define STOCK_ROW_Y0       6
+#define STOCK_ROW_Y0       3
 #define STOCK_ROW_H        32
 #define STOCK_ROW_STEP     33
 #define STOCK_CONTENT_W    188
@@ -291,7 +291,7 @@ static void bind_stock_data(void) {
 
 void ui_stock_init(void) {
   s_screenStock = lv_obj_create(nullptr);
-  ui_lvgl_configure_screen(s_screenStock);
+  ui_lvgl_configure_fullscreen(s_screenStock);
   lv_obj_set_style_bg_color(s_screenStock, lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_screenStock, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_clear_flag(s_screenStock, LV_OBJ_FLAG_SCROLLABLE);

@@ -13,18 +13,19 @@
 #include <time.h>
 
 #define MAIN_ICON_PX       32
-#define FORECAST_ICON_PX   18
+#define FORECAST_ICON_PX   22
 #define FORECAST_COL_W     64
 #define FORECAST_COL_X0    6
 #define METRIC_COL_LEFT    6
 #define METRIC_COL_RIGHT   100
-#define METRIC_ROW_H       20
-#define HEADER_DIVIDER_Y   56
-#define FORECAST_ICON_Y    60
+#define METRIC_ROW_H       22
+#define METRIC_COUNT       8
+#define HEADER_DIVIDER_Y   52
+#define FORECAST_ICON_Y    56
 #define FORECAST_DAY_Y     80
 #define FORECAST_TEMP_Y    94
-#define FORECAST_DIVIDER_Y 112
-#define METRIC_TOP_Y       118
+#define FORECAST_DIVIDER_Y 108
+#define METRIC_TOP_Y       112
 
 static lv_obj_t *s_screenWeather = nullptr;
 static lv_obj_t *s_mainIconCanvas = nullptr;
@@ -36,12 +37,12 @@ static lv_obj_t *s_conditionLabel = nullptr;
 static lv_obj_t *s_forecastIcons[WEATHER_DAILY_COUNT];
 static lv_obj_t *s_forecastDayLabels[WEATHER_DAILY_COUNT];
 static lv_obj_t *s_forecastTempLabels[WEATHER_DAILY_COUNT];
-static lv_obj_t *s_metricIcons[6];
-static lv_obj_t *s_metricLabels[6];
+static lv_obj_t *s_metricIcons[METRIC_COUNT];
+static lv_obj_t *s_metricLabels[METRIC_COUNT];
 
 static lv_color_t s_mainIconBuf[MAIN_ICON_PX * MAIN_ICON_PX];
 static lv_color_t s_forecastIconBuf[WEATHER_DAILY_COUNT][FORECAST_ICON_PX * FORECAST_ICON_PX];
-static lv_color_t s_metricIconBuf[6][METRIC_ICON_SIZE * METRIC_ICON_SIZE];
+static lv_color_t s_metricIconBuf[METRIC_COUNT][METRIC_ICON_SIZE * METRIC_ICON_SIZE];
 
 static void style_text_label(lv_obj_t *label, const lv_font_t *font) {
   lv_obj_set_style_text_color(label, lv_color_black(), LV_PART_MAIN);
@@ -130,6 +131,34 @@ static void format_uv_line(const WeatherSnapshot *snap, char *out, size_t outLen
   }
 }
 
+static void format_pm25_line(const WeatherSnapshot *snap, char *out, size_t outLen) {
+  if (snap->pm25Tenths < 0) {
+    snprintf(out, outLen, "%s", app_tr(TR_FMT_PM25_NA));
+    return;
+  }
+  const int whole = snap->pm25Tenths / 10;
+  const int frac = snap->pm25Tenths % 10;
+  if (frac == 0) {
+    snprintf(out, outLen, app_tr(TR_FMT_PM25_INT), whole);
+  } else {
+    snprintf(out, outLen, app_tr(TR_FMT_PM25_FRAC), whole, frac);
+  }
+}
+
+static void format_pm10_line(const WeatherSnapshot *snap, char *out, size_t outLen) {
+  if (snap->pm10Tenths < 0) {
+    snprintf(out, outLen, "%s", app_tr(TR_FMT_PM10_NA));
+    return;
+  }
+  const int whole = snap->pm10Tenths / 10;
+  const int frac = snap->pm10Tenths % 10;
+  if (frac == 0) {
+    snprintf(out, outLen, app_tr(TR_FMT_PM10_INT), whole);
+  } else {
+    snprintf(out, outLen, app_tr(TR_FMT_PM10_FRAC), whole, frac);
+  }
+}
+
 static void bind_weather_data(void) {
   WeatherSnapshot snap = {};
   weather_service_get_snapshot(&snap);
@@ -152,7 +181,7 @@ static void bind_weather_data(void) {
       lv_label_set_text(s_forecastDayLabels[i], "");
       lv_label_set_text(s_forecastTempLabels[i], "");
     }
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < METRIC_COUNT; i++) {
       lv_label_set_text(s_metricLabels[i], "");
     }
     return;
@@ -211,6 +240,12 @@ static void bind_weather_data(void) {
     snprintf(line, sizeof(line), "%s", app_tr(TR_FMT_PRESSURE_NA));
   }
   lv_label_set_text(s_metricLabels[5], line);
+
+  format_pm25_line(&snap, line, sizeof(line));
+  lv_label_set_text(s_metricLabels[6], line);
+
+  format_pm10_line(&snap, line, sizeof(line));
+  lv_label_set_text(s_metricLabels[7], line);
 }
 
 static lv_obj_t *create_metric_row(lv_obj_t *parent, int index, lv_coord_t x, lv_coord_t y,
@@ -236,7 +271,7 @@ static lv_obj_t *create_metric_row(lv_obj_t *parent, int index, lv_coord_t x, lv
 
 void ui_weather_init(void) {
   s_screenWeather = lv_obj_create(nullptr);
-  ui_lvgl_configure_screen(s_screenWeather);
+  ui_lvgl_configure_fullscreen(s_screenWeather);
   lv_obj_set_style_bg_color(s_screenWeather, lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_screenWeather, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_clear_flag(s_screenWeather, LV_OBJ_FLAG_SCROLLABLE);
@@ -244,7 +279,7 @@ void ui_weather_init(void) {
   s_mainIconCanvas = lv_canvas_create(s_screenWeather);
   lv_canvas_set_buffer(s_mainIconCanvas, s_mainIconBuf, MAIN_ICON_PX, MAIN_ICON_PX,
                        LV_IMG_CF_TRUE_COLOR);
-  lv_obj_set_pos(s_mainIconCanvas, 6, 8);
+  lv_obj_set_pos(s_mainIconCanvas, 6, 6);
 
   s_locationLabel = lv_label_create(s_screenWeather);
   style_text_label(s_locationLabel, UI_FONT_SM);
@@ -261,15 +296,15 @@ void ui_weather_init(void) {
 
   s_tempLabel = lv_label_create(s_screenWeather);
   style_text_label(s_tempLabel, UI_FONT_MD);
-  lv_obj_set_pos(s_tempLabel, 46, 8);
+  lv_obj_set_pos(s_tempLabel, 46, 6);
 
   s_feelsLabel = lv_label_create(s_screenWeather);
   style_text_label(s_feelsLabel, UI_FONT_SM);
-  lv_obj_set_pos(s_feelsLabel, 46, 26);
+  lv_obj_set_pos(s_feelsLabel, 46, 24);
 
   s_conditionLabel = lv_label_create(s_screenWeather);
   style_text_label(s_conditionLabel, UI_FONT_SM);
-  lv_obj_set_pos(s_conditionLabel, 46, 40);
+  lv_obj_set_pos(s_conditionLabel, 46, 38);
 
   add_divider(s_screenWeather, HEADER_DIVIDER_Y);
 
@@ -301,6 +336,10 @@ void ui_weather_init(void) {
                     METRIC_ICON_SUNRISE, s_metricIconBuf[4]);
   create_metric_row(s_screenWeather, 5, METRIC_COL_RIGHT, METRIC_TOP_Y + (METRIC_ROW_H * 2),
                     METRIC_ICON_PRESSURE, s_metricIconBuf[5]);
+  create_metric_row(s_screenWeather, 6, METRIC_COL_LEFT, METRIC_TOP_Y + (METRIC_ROW_H * 3),
+                    METRIC_ICON_PM25, s_metricIconBuf[6]);
+  create_metric_row(s_screenWeather, 7, METRIC_COL_RIGHT, METRIC_TOP_Y + (METRIC_ROW_H * 3),
+                    METRIC_ICON_PM10, s_metricIconBuf[7]);
 
   bind_weather_data();
 }

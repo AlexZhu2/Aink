@@ -1200,8 +1200,12 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
   const int wifiState = wifiConnected ? 1 : 0;
   WeatherSnapshot weather = {};
   weather_service_get_snapshot(&weather);
-  ui_status_bar_update(batteryPercent, wifiConnected,
-                       weather.valid, weather.icon, weather.tempC);
+  const bool showStatusBar = !ui_nav_hides_status_bar();
+  ui_status_bar_set_visible(showStatusBar);
+  if (showStatusBar) {
+    ui_status_bar_update(batteryPercent, wifiConnected,
+                         weather.valid, weather.icon, weather.tempC);
+  }
 
   ui_lvgl_prepare();
   if (fullLvgl) {

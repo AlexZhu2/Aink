@@ -3,6 +3,7 @@
 #include "app_locale.h"
 #include "stock_service.h"
 #include "ui_fonts.h"
+#include "ui_lvgl.h"
 
 #include <Arduino.h>
 #include <limits.h>
@@ -10,7 +11,7 @@
 #include <string.h>
 
 #define DETAIL_CHART_W   188
-#define DETAIL_CHART_H   86
+#define DETAIL_CHART_H   106
 #define DETAIL_CHART_Y   88
 #define DETAIL_LINE_W    3
 #define DETAIL_PRICE_X   6
@@ -205,7 +206,7 @@ static bool load_intraday(const StockQuote *quote) {
 
 void ui_stock_detail_init(void) {
   s_screenDetail = lv_obj_create(nullptr);
-  lv_obj_set_size(s_screenDetail, 200, 180);
+  ui_lvgl_configure_fullscreen(s_screenDetail);
   lv_obj_set_style_bg_color(s_screenDetail, lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_screenDetail, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_clear_flag(s_screenDetail, LV_OBJ_FLAG_SCROLLABLE);
@@ -253,6 +254,8 @@ void ui_stock_detail_init(void) {
   lv_label_set_text(s_chartEmptyLabel, app_tr(TR_STOCK_CHART_NA));
   lv_obj_center(s_chartEmptyLabel);
   lv_obj_add_flag(s_chartEmptyLabel, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_move_foreground(s_nameLabel);
 }
 
 void ui_stock_detail_show(int quoteIndex) {

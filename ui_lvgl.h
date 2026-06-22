@@ -10,5 +10,6 @@ void ui_lvgl_prepare(void);
 void ui_lvgl_refresh(void);
 void ui_lvgl_refresh_partial(void);
 void ui_lvgl_configure_screen(lv_obj_t *screen);
+void ui_lvgl_configure_fullscreen(lv_obj_t *screen);
 
 #endif

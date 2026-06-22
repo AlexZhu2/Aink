@@ -306,7 +306,7 @@ void ui_home_init(void) {
   }
 
   s_screenDetail = lv_obj_create(nullptr);
-  ui_lvgl_configure_screen(s_screenDetail);
+  ui_lvgl_configure_fullscreen(s_screenDetail);
   lv_obj_set_style_bg_color(s_screenDetail, lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_screenDetail, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_clear_flag(s_screenDetail, LV_OBJ_FLAG_SCROLLABLE);

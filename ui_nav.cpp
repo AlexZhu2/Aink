@@ -54,6 +54,10 @@ bool ui_nav_is_life(void) {
   return !s_onHome && ui_life_is_active();
 }
 
+bool ui_nav_hides_status_bar(void) {
+  return !s_onHome;
+}
+
 static void go_home(UiRefreshMode *outRefreshMode) {
   if (ui_vision_is_active()) {
     ui_vision_leave();

@@ -568,7 +568,7 @@ static bool startLocalAsk(AnswersMode mode) {
 
 void ui_answers_init(void) {
   s_screenAnswers = lv_obj_create(nullptr);
-  ui_lvgl_configure_screen(s_screenAnswers);
+  ui_lvgl_configure_fullscreen(s_screenAnswers);
   lv_obj_set_style_bg_color(s_screenAnswers, lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_screenAnswers, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_clear_flag(s_screenAnswers, LV_OBJ_FLAG_SCROLLABLE);

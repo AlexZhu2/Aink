@@ -14,5 +14,6 @@ bool ui_nav_is_answers(void);
 bool ui_nav_is_stock(void);
 bool ui_nav_is_clock(void);
 bool ui_nav_is_life(void);
+bool ui_nav_hides_status_bar(void);
 
 #endif

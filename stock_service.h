@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define STOCK_MAX_ITEMS  5
+#define STOCK_MAX_ITEMS  6
 #define STOCK_SYMBOL_LEN 12
 #define STOCK_NAME_LEN   32
 

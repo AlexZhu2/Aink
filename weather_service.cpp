@@ -185,6 +185,7 @@ void weather_service_reset(void) {
   s_snapshot.pressureHpa = -1;
   s_snapshot.usAqi = -1;
   s_snapshot.pm25Tenths = -1;
+  s_snapshot.pm10Tenths = -1;
   s_lastFetchMs = 0;
   s_lastAttemptMs = 0;
   s_freshFetchPending = false;
@@ -700,14 +701,22 @@ static bool parseAirIndexByCode(const String &body, const char *code, int *outAq
   return false;
 }
 
-static bool parseAirPm25(const String &body, float *outPm) {
-  if (outPm == nullptr) {
+static bool parseAirPollutant(const String &body, const char *pollutantCode, float *outPm) {
+  if (outPm == nullptr || pollutantCode == nullptr) {
     return false;
   }
 
+  char spaced[32];
+  char compact[32];
+  snprintf(spaced, sizeof(spaced), "\"code\": \"%s\"", pollutantCode);
+  snprintf(compact, sizeof(compact), "\"code\":\"%s\"", pollutantCode);
+
   int searchFrom = 0;
   while (true) {
-    const int idx = body.indexOf("\"pm2p5\"", searchFrom);
+    int idx = body.indexOf(spaced, searchFrom);
+    if (idx < 0) {
+      idx = body.indexOf(compact, searchFrom);
+    }
     if (idx < 0) {
       return false;
     }
@@ -720,7 +729,7 @@ static bool parseAirPm25(const String &body, float *outPm) {
       }
     }
 
-    searchFrom = idx + 7;
+    searchFrom = idx + 1;
   }
 }
 
@@ -766,13 +775,16 @@ static bool fetchQWeatherAir(const char *host, const char *apiKey, float lat, fl
     return false;
   }
 
-  float pmF = -1.0f;
-  parseAirPm25(body, &pmF);
+  float pm25F = -1.0f;
+  float pm10F = -1.0f;
+  parseAirPollutant(body, "pm2p5", &pm25F);
+  parseAirPollutant(body, "pm10", &pm10F);
 
   out->usAqi = aqi;
-  out->pm25Tenths = pmF >= 0.0f ? (int)(pmF * 10.0f + 0.5f) : -1;
+  out->pm25Tenths = pm25F >= 0.0f ? (int)(pm25F * 10.0f + 0.5f) : -1;
+  out->pm10Tenths = pm10F >= 0.0f ? (int)(pm10F * 10.0f + 0.5f) : -1;
   out->aqiValid = true;
-  Serial.printf("[Weather] aqi=%d pm2.5=%.1f\n", out->usAqi, pmF);
+  Serial.printf("[Weather] aqi=%d pm2.5=%.1f pm10=%.1f\n", out->usAqi, pm25F, pm10F);
   return true;
 }
 
@@ -915,6 +927,7 @@ static bool fetchWeather(WeatherSnapshot *out) {
     snapshot.pressureHpa = -1;
     snapshot.usAqi = -1;
     snapshot.pm25Tenths = -1;
+    snapshot.pm10Tenths = -1;
     if (!parseQWeatherNow(nowBody, &snapshot)) {
       char apiCode[16] = {};
       parseQWeatherApiCode(nowBody, apiCode, sizeof(apiCode));
