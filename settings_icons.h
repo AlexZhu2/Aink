@@ -185,4 +185,40 @@ static const uint32_t clock_face_bitmap[SETTINGS_ICON_SIZE] = {
   0x00000000u,
 };
 
+/** 4x4 grid (Conway Life tile). */
+static const uint32_t life_grid_bitmap[SETTINGS_ICON_SIZE] = {
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x06600660u,
+  0x09900990u,
+  0x06600660u,
+  0x00000000u,
+  0x06600660u,
+  0x09900990u,
+  0x06600660u,
+  0x00000000u,
+  0x06600660u,
+  0x09900990u,
+  0x06600660u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+};
+
 #endif

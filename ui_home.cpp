@@ -8,6 +8,7 @@
 #include "settings_icons.h"
 #include "settings_api.h"
 #include "ui_fonts.h"
+#include "ui_lvgl.h"
 
 #include <Arduino.h>
 #include <stdio.h>
@@ -16,7 +17,7 @@
 
 #define TILE_ICON_PX         32
 #define HOME_SLOTS_PER_PAGE  4
-#define HOME_LOGICAL_COUNT   6
+#define HOME_LOGICAL_COUNT   7
 
 static lv_obj_t *s_screenHome = nullptr;
 static lv_obj_t *s_screenDetail = nullptr;
@@ -37,6 +38,7 @@ static AppStrId logical_tile_str_id(int logicalIndex) {
     TR_TILE_APP2,
     TR_TILE_BOOK,
     TR_TILE_APP3,
+    TR_TILE_LIFE,
     TR_TILE_SETTINGS,
   };
   if (logicalIndex < 0 || logicalIndex >= HOME_LOGICAL_COUNT) {
@@ -158,6 +160,11 @@ static void bind_stock_slot(int slot) {
   lv_label_set_text(s_subLabels[slot], line);
 }
 
+static void bind_life_slot(int slot) {
+  canvas_set_bitmap_icon(s_iconCanvas[slot], life_grid_bitmap);
+  lv_label_set_text(s_subLabels[slot], app_tr(TR_LIFE_HINT));
+}
+
 static void bind_settings_slot(int slot) {
   canvas_set_bitmap_icon(s_iconCanvas[slot], settings_gear_bitmap);
   lv_label_set_text(s_subLabels[slot],
@@ -190,6 +197,9 @@ static void bind_slot_content(int slot, int logicalIndex) {
       bind_stock_slot(slot);
       break;
     case 5:
+      bind_life_slot(slot);
+      break;
+    case 6:
       bind_settings_slot(slot);
       break;
     default:
@@ -266,7 +276,7 @@ void ui_home_reset_focus(void) {
 
 void ui_home_init(void) {
   s_screenHome = lv_obj_create(nullptr);
-  lv_obj_set_size(s_screenHome, 200, 180);
+  ui_lvgl_configure_screen(s_screenHome);
   lv_obj_set_style_bg_color(s_screenHome, lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_screenHome, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_clear_flag(s_screenHome, LV_OBJ_FLAG_SCROLLABLE);
@@ -296,7 +306,7 @@ void ui_home_init(void) {
   }
 
   s_screenDetail = lv_obj_create(nullptr);
-  lv_obj_set_size(s_screenDetail, 200, 180);
+  ui_lvgl_configure_fullscreen(s_screenDetail);
   lv_obj_set_style_bg_color(s_screenDetail, lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_screenDetail, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_clear_flag(s_screenDetail, LV_OBJ_FLAG_SCROLLABLE);

@@ -12,6 +12,8 @@ enum MetricIconKind {
   METRIC_ICON_PRESSURE,
   METRIC_ICON_AQI,
   METRIC_ICON_SUNRISE,
+  METRIC_ICON_PM25,
+  METRIC_ICON_PM10,
   METRIC_ICON_COUNT
 };
 
@@ -92,6 +94,32 @@ static const uint16_t metric_icon_bitmaps[METRIC_ICON_COUNT][METRIC_ICON_SIZE] =
     0b0000000000,
     0b0000000000,
     0b0000000000,
+    0b0000000000,
+  },
+  /* pm2.5 — particulate dots */
+  {
+    0b0010010010,
+    0b0000000000,
+    0b0100100101,
+    0b0000000000,
+    0b0010010010,
+    0b0000000000,
+    0b0100100101,
+    0b0000000000,
+    0b0010010010,
+    0b0000000000,
+  },
+  /* pm10 — larger particulate dots */
+  {
+    0b0110011000,
+    0b0000000000,
+    0b1100110011,
+    0b0000000000,
+    0b0110011000,
+    0b0000000000,
+    0b1100110011,
+    0b0000000000,
+    0b0110011000,
     0b0000000000,
   },
 };

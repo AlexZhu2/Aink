@@ -1,215 +1,206 @@
-# Aink
+<p align="center">
+  <img src="assets/logo-circuit-ink.png" alt="AInk — Circuit Ink" width="360">
+</p>
 
-Aink is a 2×2 app platform for **Seeed XIAO ESP32-S3 Sense** + **Waveshare 1.54 inch B&W e-paper** (200×200). It ships with WiFi provisioning, LVGL UI, button navigation, tiered e-paper refresh, and pluggable mini-apps.
+<p align="center">
+  <strong>A pocket e-paper computer on ESP32-S3</strong><br>
+  200×200 monochrome display · two-button UX · seven mini-apps · bilingual firmware
+</p>
 
-## Hardware
+<p align="center">
+  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-| Part | Notes |
-|------|-------|
-| MCU | Seeed Studio **XIAO ESP32-S3 Sense** (camera module required for AI Vision) |
-| Display | Waveshare [EPD_1in54_V2](https://www.waveshare.com/1.54inch-e-paper.htm) (200×200) |
-| Button A | D6 / GPIO43 (active LOW, internal pull-up) |
-| Button B | D7 / GPIO44 (active LOW, internal pull-up) |
+---
 
-See `DEV_Config.h` for EPD wiring (DIN D10, CLK D8, CS D9, DC D3, RST D1, BUSY D0).
+## 1. Product overview
 
-### Arduino board settings (required)
+**AInk** (*Circuit Ink*) is firmware for a minimalist handheld built around the **Seeed XIAO ESP32-S3 Sense** and a **Waveshare 1.54″** black-and-white e-paper panel. It targets users who want glanceable information and small interactive apps without a phone — and developers who want a complete, hackable reference for LVGL on constrained e-paper hardware.
 
-| Option | Value |
-|--------|--------|
-| Board | **Seeed XIAO ESP32S3 Sense** |
-| PSRAM | **OPI PSRAM → Enabled** |
-| Partition | **Huge APP (3MB+)** |
-| LVGL | **8.3.x** (not 9.x) |
-| ESP32 core | **3.x** (camera driver) |
+| Attribute | Specification |
+|-----------|----------------|
+| Display | 200×200 px, 1-bit, partial refresh |
+| Input | 2 buttons (A / B), optional serial simulation |
+| Connectivity | WiFi + captive portal provisioning |
+| On-device UI | LVGL 8.3, custom 1-bit flush pipeline |
+| Locale | English / 中文 (NVS-persisted) |
+| Apps | Clock, Weather, AI Vision, Answers, Stocks, Life, Settings |
 
-Boot log should show `[Camera] ready (240x240 JPEG)` and non-zero `freePsram`.
+**Design principles**
 
-## Features
+- **Calm UI** — tiered refresh (`FAST` / `NAV` / `QUALITY` / `FULL`) balances latency and ghosting.
+- **Home vs app** — launcher keeps a 20 px status bar; every app runs **full-screen** for maximum content area.
+- **Offline-first where it matters** — Answers and Life work without cloud keys; Weather/Stocks/Vision degrade gracefully.
 
-### Platform
+---
 
-- WiFi captive portal + QR setup; credentials stored in NVS
-- Status bar: single datetime line, dynamic weather icon/temp, battery (hand-drawn 8×16 ASCII on the physical right edge)
-- Paged 2×2 launcher with tile icons; A = move focus, B = open app, A long = back
-- LVGL 8.3 main UI (200×180) + 1-bit e-paper flush
-- Refresh modes: FAST / NAV / QUALITY / FULL
-- NTP (UTC+8)
+## 2. System architecture
 
-### Apps
+```
+┌─────────────────────────────────────────────────────────┐
+│  Aink.ino — boot, WiFi portal, refresh scheduler, NTP   │
+├─────────────────────────────────────────────────────────┤
+│  ui_nav / ui_home — paged 2×2 launcher, routing         │
+│  ui_status_bar — date, WiFi, weather peek, battery      │
+│  ui_* apps — Clock, Weather, Vision, Answers, …         │
+├─────────────────────────────────────────────────────────┤
+│  ui_lvgl + epaper_canvas — LVGL 8.3 → 1-bit framebuffer │
+├─────────────────────────────────────────────────────────┤
+│  Services: weather, stock, vision, voice, camera, NVS   │
+└─────────────────────────────────────────────────────────┘
+         │ HTTPS / gzip (puff)              │ EPD SPI
+         ▼                                  ▼
+   QWeather, OpenAI, MiMo, …          Waveshare 1.54″ V2
+```
 
-| Tile | Status |
-|------|--------|
-| Weather | QWeather forecast, metrics, AQI/UV, 3-day outlook (tomorrow onward) |
-| **AI Vision** | Camera capture + cloud poetic description (≤40 Chinese chars); eye icon on launcher |
-| **Answers** | Local Book of Answers app with photo, voice, and automatic oracle modes |
-| Stocks | Watchlist quotes and change preview |
-| Settings | WiFi, **QWeather key/host**, AI provider/model/API key, Display, About; gear icon on launcher; EN/ZH |
+---
 
-### Weather (QWeather / 和风)
+## 3. Applications
 
-- Register at [console.qweather.com](https://console.qweather.com) — copy **API Key** and **API Host** (project-specific, e.g. `xxx.re.qweatherapi.com`; no `https://` prefix).
-- Configure via captive portal (**天气 API** card) or **Settings → WiFi → Configure Weather**.
-- Flow: IP geolocation (`ip-api.com`, HTTP) → QWeather geo lookup (LocationID) → `/v7/weather/now`, `/airquality/v1/current/{lat}/{lon}`, `/v7/weather/7d` (includes `uvIndex` for today), optional UV indices fallback on your API Host (HTTPS).
-- Auth: **`X-QW-Api-Key` header** (not `key=` in URL). Responses are **gzip-compressed**; firmware decompresses with embedded **`puff.c`** (no system `zlib.h`).
-- Detail page shows **city** (`adm2`), not district. Three-day row shows **tomorrow, day after, and day after that** (today excluded).
-- Refreshes every 30 minutes when WiFi is connected.
+| App | Capability |
+|-----|------------|
+| **Clock** | 40 px digit font; optional date line |
+| **Weather** | Live conditions, 3-day forecast, humidity / UV / wind / AQI / sunrise / pressure / **PM2.5 & PM10** |
+| **AI Vision** | Camera JPEG → cloud vision API → ≤40-character caption |
+| **Answers** | Offline Book of Answers (100 entries); photo / voice / random seeds |
+| **Stocks** | Up to **6** watchlist symbols; detail view with intraday chart |
+| **Life** | Conway’s Game of Life; classic seeds (Pulsar, LWSS, Gosper gun, …) |
+| **Settings** | WiFi, QWeather, AI provider & key, display, about |
 
-### AI Vision
+### Weather data pipeline
 
-- **A short press** (serial `n`) on the vision screen: capture → HTTPS → show result on e-paper
-- Providers: **OpenAI**, **Gemini**, **Kimi Platform**, **MiMo Token Plan**
-- Vision-capable models:
-  - MiMo: `mimo-v2.5`, `mimo-v2-omni` (not `mimo-v2.5-pro`)
-  - Kimi: recommend `moonshot-v1-8k-vision-preview`
-  - OpenAI: `gpt-4o-mini`, `gpt-4o`, etc.
-- MiMo auth: `Authorization: Bearer <key>` (Token Plan / platform key)
-- Camera pauses during HTTPS to avoid `cam_hal: FB-OVF` (frame buffer overflow warnings)
+1. IP geolocation → QWeather geo lookup (LocationID)
+2. `/v7/weather/now`, `/v7/weather/7d`, `/airquality/v1/current/{lat}/{lon}`
+3. Auth via `X-QW-Api-Key`; gzip decompressed in-firmware (`puff.c`)
+4. City label uses prefecture (`adm2`); forecast excludes today
 
-Configure API key via captive portal or **Settings → Model**. MiMo keys often start with `tp-`; Kimi Platform uses keys from [platform.kimi.ai](https://platform.kimi.ai).
+### Cloud integrations
 
-### Answers
+| Feature | Providers / APIs |
+|---------|------------------|
+| Weather | [QWeather](https://console.qweather.com) |
+| Vision | OpenAI, Gemini, Kimi, MiMo Token Plan |
+| Voice | MiMo ASR + chat (Token Plan key) |
 
-- Open the **Answers / 答案之书** launcher app. Press **A short press** (serial `n`) to switch between **photo oracle**, **voice oracle**, and **automatic oracle**, then press **B** (serial `c`) to confirm.
-- Photo oracle shows a direct black/white preview and uses the captured JPEG bytes only as a local seed. It does not upload the image or call the vision provider.
-- Voice oracle records a short local microphone sample and hashes its energy pattern into a seed. Automatic oracle uses device entropy and time.
-- Results come from the built-in humorous answer list, so this app works offline and does not require an API key.
+Answers and Life require **no API key**.
 
-### Voice Interaction
+---
 
-- **B double-click** (serial `v`): start recording from the XIAO ESP32S3 Sense PDM microphone.
-- **B double-click again**: stop recording, wrap the captured PCM as 16 kHz mono WAV, transcribe it with Xiaomi MiMo ASR, then send the transcript as text to Xiaomi MiMo.
-- Input format is finalized as **transcribed text**, not raw audio, for the chat/LLM stage. The audio is used only for STT.
-- Current STT implementation uses Xiaomi MiMo `mimo-v2.5-asr` through `/v1/chat/completions` with `input_audio.data` set to a `data:audio/wav;base64,...` URL.
-- The downstream LLM request also uses Xiaomi MiMo `/v1/chat/completions`; select **MiMo Token Plan** in Settings so the saved API key matches this voice flow.
-- During the speaking state, **A short press** interrupts the speaker state and keeps the LLM text visible on the Voice screen.
+## 4. Interaction model
 
-The microphone uses the Sense expansion board PDM pins: GPIO42 clock and GPIO41 data. Speaker/TTS playback is represented by an interruptible state machine until a concrete speaker amp/DAC pinout and playback driver are added.
+| Input | Global behavior |
+|-------|-----------------|
+| **A** click | Next / app action |
+| **A** double | Previous |
+| **A** long | Back to home |
+| **B** click | Open / confirm |
+| **B** double | Voice record toggle |
 
-### i18n
+Set `BTN_SERIAL_SIM=1` in `btn_input.h` to map `n` / `p` / `b` / `c` / `v` on serial **115200**.
 
-- Default language: **English**
-- Switch: **Settings → Display → Language** (press B to toggle)
-- Preference saved in NVS (`lang` key)
-- UI fonts: `aink_3500_12.c` / `aink_3500_14.c` (~3500 common Chinese + UI strings)
+---
 
-## Quick start
+## 5. Hardware & firmware requirements
 
-1. Install [Arduino IDE 2.x](https://www.arduino.cc/en/software) or arduino-cli
-2. Board package: **esp32 by Espressif** (3.x), board **XIAO ESP32S3 Sense**
-3. Enable **OPI PSRAM** and **Huge APP** partition
-4. Library: **lvgl 8.3.x** (not 9.x)
-5. Open `Aink.ino` (this folder is the sketch root)
-6. Upload; serial monitor **115200**
+| Component | Detail |
+|-----------|--------|
+| MCU | Seeed **XIAO ESP32-S3 Sense** (camera + PDM mic) |
+| Panel | [EPD_1in54_V2](https://www.waveshare.com/1.54inch-e-paper.htm) |
+| Button A | D6 / GPIO43 |
+| Button B | D7 / GPIO44 |
+| EPD pins | See `DEV_Config.h` |
 
-First boot without saved WiFi enters AP portal mode automatically.
+| Arduino option | Value |
+|----------------|--------|
+| Board | Seeed XIAO ESP32S3 Sense |
+| PSRAM | OPI PSRAM **Enabled** |
+| Partition | Huge APP (3 MB+) |
+| LVGL | **8.3.x** |
+| ESP32 core | **3.x** |
 
-### Serial button simulation
+---
 
-With `BTN_SERIAL_SIM=1` in `btn_input.h`:
+## 6. Developer guide
 
-| Key | Action |
-|-----|--------|
-| n | A click (next / **capture in AI Vision; switch or capture in Answers**) |
-| p | A double (prev) |
-| b | A long (back) |
-| c | B confirm |
-| v | B double (voice record toggle) |
-| h | help |
+### 6.1 Quick start
 
-### Test vision API on PC (before flashing)
+```text
+1. Install Arduino IDE 2.x (or arduino-cli) + esp32 board package 3.x
+2. Install lvgl 8.3.x
+3. Open Aink.ino (this directory = sketch root)
+4. Upload → serial monitor 115200
+```
 
-Same HTTP payload as the device; useful to validate API key and model:
+First boot without saved WiFi enters **captive portal** (QR / AP) for WiFi, weather key, and optional AI key.
+
+### 6.2 Boot splash
+
+```powershell
+python tools/bmp_to_boot_splash.py path\to\splash.bmp --out boot_splash_image.h
+```
+
+Requires 200×200 1-bit BMP.
+
+### 6.3 Vision API smoke test (PC)
 
 ```powershell
 cd Aink
 $env:MIMO_API_KEY = "your-key"
-python tools/test_vision_api.py --provider mimo --image path\to\photo.jpg
+python tools/test_vision_api.py --provider mimo --image photo.jpg
 ```
 
-Providers: `mimo`, `kimi`, `openai`. See `tools/test_vision_api.py --help`.
-
-## Fonts and icons
-
-### Chinese fonts
-
-Regenerate symbol list and fonts:
+### 6.4 Fonts & assets
 
 ```bash
 python tools/build_cn_symbols.py
-python tools/build_fonts.py
-```
-
-`build_fonts.py` needs Node.js (`npx`) and writes `aink_3500_12.c` / `aink_3500_14.c` (Noto Sans SC is cached under `tools/fonts/`, gitignored).
-
-Manual option: [LVGL Font Converter](https://lvgl.io/tools/fontconverter) (**LVGL 8.x**):
-
-Converter settings:
-
-- Bpp: **1**, size **12** / **14**
-- Range: `0x20-0x7F`
-- Symbols: paste from `tools/cn_font_symbols.txt` (3500 common chars + UI strings + CJK punctuation)
-- Output: `aink_3500_12.c`, `aink_3500_14.c`
-- If the converter adds `.static_bitmap = 0` (LVGL 9), **remove that line** for LVGL 8.3
-
-Update `ui_fonts.h` / `lv_conf.h` if you rename outputs.
-
-### Weather and launcher icons
-
-```bash
+python tools/build_fonts.py          # Node npx required
+python tools/build_clock_font.py
 python tools/svg_to_weather_icons.py
-python tools/png_to_tile_icons.py
+python tools/png_to_tile_icons.py    # gear.png / eye.png in sketch root (local)
 ```
 
-- Weather icons: rasterize `wi-*.svg` → `weather_icons.h` (16×16).
-- Launcher icons: **`stock.svg`** is committed; place **`gear.png`** and **`eye.png`** in the sketch root (local only; gitignored). Run `png_to_tile_icons.py` → `settings_icons.h` (32×32 outline bitmaps for all launcher tiles).
+CJK: ~3500 chars in `tools/cn_font_symbols.txt` → `aink_3500_12.c` / `aink_3500_14.c`.  
+Manual path: [LVGL Font Converter](https://lvgl.io/tools/fontconverter) (LVGL 8.x, bpp 1). Strip `.static_bitmap = 0` if present.
 
-## Project layout
+### 6.5 Source map
 
-```
-Aink.ino              Boot, WiFi portal, status bar, refresh orchestration
-epaper_canvas.*       Framebuffer, rotation, EPD upload
-ui_home / ui_nav      Launcher (tile icons) and navigation
-ui_weather.*          Weather app
-ui_vision.*           AI Vision UI
-ui_answers.*          Book of Answers UI
-ui_settings.*         Settings app (multi-level menu)
-vision_service.*      Camera JPEG → optional obfuscation → HTTPS vision API → normalized text
-camera_service.*      XIAO Sense camera (240×240 JPEG)
-ai_model_config.*     Provider/model presets and URLs
-app_locale.*          EN/ZH strings
-settings_api.*        NVS (WiFi, language, AI key, QWeather key/host)
-weather_service.*     QWeather fetch, parse, icon mapping
-weather_gzip.*          Gzip decompress wrapper (uses puff)
-puff.c / puff.h         Embedded deflate decompressor (public domain)
-settings_icons.h      Launcher gear, eye, and stock bitmaps (generated)
-aink_3500_12/14.c     LVGL CJK fonts (~3500 chars)
-tools/                Font/icons/API test scripts
-```
+| Module | Role |
+|--------|------|
+| `Aink.ino` | Boot, portal, refresh orchestration |
+| `epaper_canvas.*` | Framebuffer, rotation, async upload |
+| `ui_nav / ui_home` | Launcher + routing |
+| `ui_status_bar.*` | Status bar (home only) |
+| `ui_lvgl.*` | LVGL init; screen vs fullscreen |
+| `ui_*` | Per-app UI |
+| `*_service.*` | Weather, stock, vision, voice backends |
+| `settings_api.*` | NVS configuration |
+| `app_locale.*` | EN/ZH strings |
+| `puff.c` | Gzip inflate |
+| `tools/` | Build & test scripts |
 
-## Troubleshooting
+---
 
-| Symptom | Check |
-|---------|--------|
-| All Chinese shows □ | LVGL **8.3.x**; remove `.static_bitmap` from font `.c` if present |
-| `[Camera] init failed` / `frame buffer malloc failed` | **PSRAM Enabled**; partition ≥ 3MB; Sense board with camera |
-| `[Vision] HTTP -1` | PSRAM + WiFi; test with `tools/test_vision_api.py` on PC |
-| `[Weather] QWeather key/host not configured` | Settings → WiFi → Configure Weather, or portal **天气 API** card |
-| `[Weather] now HTTP -1` | WiFi; API Host (no `https://`) and Key at [console.qweather.com](https://console.qweather.com) |
-| `[Weather] QWeather code=401/403` | Key invalid or Host does not match project; use console Host, not legacy `devapi.qweather.com` |
-| `[Weather] air request failed` / `air parse failed` | Air Quality uses `/airquality/v1/current/{lat}/{lon}` (not legacy `/v7/air/now`); confirm your QWeather plan includes Air Quality API |
-| `[Weather] gzip …` missing / parse failed | Reflash latest firmware (`puff.c` + `weather_gzip.cpp` in sketch) |
-| `undefined reference to puff` | Clean build (Sketch → Clean All); ensure `puff.c` and `puff.h` are in sketch folder |
-| `provider unsupported` | MiMo unsupported model → use **v2.5** / **v2-omni** |
-| Screen stuck on「分析中」 | Reflash latest firmware (NAV refresh after capture) |
-| `cam_hal: FB-OVF` | Harmless warning if capture works; camera pauses during HTTPS |
+## 7. Operations & troubleshooting
 
-## Notes for contributors
+| Symptom | Likely cause |
+|---------|----------------|
+| Chinese □ boxes | LVGL 8.3.x; missing glyphs in `cn_font_symbols.txt`; remove `.static_bitmap` from font `.c` |
+| Camera / PSRAM fail | Enable OPI PSRAM; Huge APP; Sense board with camera |
+| Weather 401/403 | API Host / Key mismatch; plan lacks Air Quality |
+| PM2.5 / PM10 `--` | No pollutant data for coordinates |
+| `undefined reference to puff` | Clean build; ensure `puff.c` in sketch |
+| Vision HTTP -1 | WiFi + PSRAM; validate with `test_vision_api.py` |
 
-- Do not break status-bar orientation or portal-only horizontal mirror (`epaper_canvas.cpp`).
-- E-paper is 1-bit: LVGL grays are thresholded in flush; avoid large gray fills.
-- Do not commit API keys, local test images, or source PNGs (`gear.png` / `eye.png` are gitignored; commit generated `settings_icons.h` instead).
+Serial tags: `[Weather]`, `[Vision]`, `[Stock]`, `[Life]`, `[LVGL]`.
 
-## License
+---
+
+## 8. License
 
 MIT — see `LICENSE`. Waveshare EPD driver files retain their original header terms.
+
+---
+
+<p align="center">
+  <sub>AInk · Circuit Ink · firmware v0.1</sub>
+</p>

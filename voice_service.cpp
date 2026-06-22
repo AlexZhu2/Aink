@@ -37,6 +37,14 @@
 #define VOICE_AUDIO_MAX_GAIN        10.0
 #define VOICE_AUDIO_CLIP_LIMIT      30000.0
 
+typedef enum {
+  VOICE_PROGRESS_NONE = 0,
+  VOICE_PROGRESS_PREPARING_AUDIO,
+  VOICE_PROGRESS_UPLOADING_AUDIO,
+  VOICE_PROGRESS_TRANSCRIBING,
+  VOICE_PROGRESS_GENERATING_RESPONSE,
+} VoiceProgress;
+
 static const char *kVoiceMimoUrls[] = {
     "https://api.xiaomimimo.com/v1/chat/completions",
     "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
@@ -56,6 +64,7 @@ static volatile bool s_recordStopRequested = false;
 static bool s_localSeedCaptureActive = false;
 static portMUX_TYPE s_voiceMux = portMUX_INITIALIZER_UNLOCKED;
 static VoiceState s_state = VOICE_STATE_IDLE;
+static VoiceProgress s_progress = VOICE_PROGRESS_NONE;
 static bool s_dirty = false;
 static char s_transcript[256];
 static char s_result[384];
@@ -90,6 +99,16 @@ static void copyText(char *dst, size_t dstLen, const char *src) {
 static void setState(VoiceState state) {
   portENTER_CRITICAL(&s_voiceMux);
   s_state = state;
+  if (state != VOICE_STATE_THINKING) {
+    s_progress = VOICE_PROGRESS_NONE;
+  }
+  s_dirty = true;
+  portEXIT_CRITICAL(&s_voiceMux);
+}
+
+static void setProgress(VoiceProgress progress) {
+  portENTER_CRITICAL(&s_voiceMux);
+  s_progress = progress;
   s_dirty = true;
   portEXIT_CRITICAL(&s_voiceMux);
 }
@@ -98,6 +117,7 @@ static void setError(const char *message) {
   portENTER_CRITICAL(&s_voiceMux);
   copyText(s_error, sizeof(s_error), message);
   s_state = VOICE_STATE_ERROR;
+  s_progress = VOICE_PROGRESS_NONE;
   s_dirty = true;
   portEXIT_CRITICAL(&s_voiceMux);
   Serial.printf("[Voice] error: %s\r\n", message != nullptr ? message : "");
@@ -680,6 +700,7 @@ static bool beginRecording(void) {
   s_transcript[0] = '\0';
   s_result[0] = '\0';
   s_error[0] = '\0';
+  s_progress = VOICE_PROGRESS_NONE;
   s_state = VOICE_STATE_RECORDING;
   s_dirty = true;
   portEXIT_CRITICAL(&s_voiceMux);
@@ -731,6 +752,11 @@ static bool stopRecordingAndStartPipeline(void) {
   }
 
   Serial.printf("[Voice] recording stopped, pcm=%u bytes\r\n", (unsigned)s_pcmLen);
+  portENTER_CRITICAL(&s_voiceMux);
+  s_state = VOICE_STATE_THINKING;
+  s_progress = VOICE_PROGRESS_PREPARING_AUDIO;
+  s_dirty = true;
+  portEXIT_CRITICAL(&s_voiceMux);
   Serial.println("[Voice] raw audio stats:");
   logAudioStats(s_pcm, s_pcmLen);
   normalizeCapturedPcm(s_pcm, s_pcmLen);
@@ -751,6 +777,7 @@ static bool stopRecordingAndStartPipeline(void) {
   portENTER_CRITICAL(&s_voiceMux);
   copyText(s_result, sizeof(s_result), "Recording diagnostic dumped to serial");
   s_state = VOICE_STATE_DONE;
+  s_progress = VOICE_PROGRESS_NONE;
   s_dirty = true;
   portEXIT_CRITICAL(&s_voiceMux);
   return true;
@@ -772,7 +799,6 @@ static bool stopRecordingAndStartPipeline(void) {
   s_pcm = nullptr;
   s_pcmLen = 0;
 
-  setState(VOICE_STATE_THINKING);
   if (xTaskCreate(voice_pipeline_task, "voice", VOICE_TASK_STACK_BYTES, nullptr, 1, &s_task) != pdPASS) {
     free(s_jobWav);
     s_jobWav = nullptr;
@@ -888,6 +914,7 @@ static bool transcribeMimo(uint8_t *wav, size_t wavLen, char *out, size_t outLen
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)ESP.getMinFreeHeap());
   Serial.flush();
+  setProgress(VOICE_PROGRESS_UPLOADING_AUDIO);
 
   char apiKey[129];
   settings_api_get_api_key(apiKey, sizeof(apiKey));
@@ -931,6 +958,7 @@ static bool transcribeMimo(uint8_t *wav, size_t wavLen, char *out, size_t outLen
   Serial.printf("[Voice] MiMo ASR POST body=%u heap=%u psram=%u\r\n",
                 (unsigned)strlen(body), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
   Serial.flush();
+  setProgress(VOICE_PROGRESS_TRANSCRIBING);
 
   int httpCode = 0;
   String response;
@@ -1076,6 +1104,7 @@ static void voice_pipeline_task(void *param) {
 
   portENTER_CRITICAL(&s_voiceMux);
   copyText(s_transcript, sizeof(s_transcript), transcript);
+  s_progress = VOICE_PROGRESS_GENERATING_RESPONSE;
   s_dirty = true;
   portEXIT_CRITICAL(&s_voiceMux);
   Serial.printf("[Voice] transcript: %s\r\n", transcript);
@@ -1105,6 +1134,7 @@ static void voice_pipeline_task(void *param) {
 
 void voice_service_init(void) {
   s_state = VOICE_STATE_IDLE;
+  s_progress = VOICE_PROGRESS_NONE;
   s_dirty = false;
   s_transcript[0] = '\0';
   s_result[0] = '\0';
@@ -1312,13 +1342,13 @@ void voice_service_status_text(char *out, size_t outLen) {
   }
 
   VoiceState state;
-  char transcript[sizeof(s_transcript)];
+  VoiceProgress progress;
   char result[sizeof(s_result)];
   char error[sizeof(s_error)];
   size_t pcmLen;
   portENTER_CRITICAL(&s_voiceMux);
   state = s_state;
-  copyText(transcript, sizeof(transcript), s_transcript);
+  progress = s_progress;
   copyText(result, sizeof(result), s_result);
   copyText(error, sizeof(error), s_error);
   pcmLen = s_pcmLen;
@@ -1334,7 +1364,28 @@ void voice_service_status_text(char *out, size_t outLen) {
       break;
     }
     case VOICE_STATE_THINKING:
-      snprintf(out, outLen, zh ? "正在转写并请求 LLM..." : "Transcribing and asking the LLM...");
+      switch (progress) {
+        case VOICE_PROGRESS_PREPARING_AUDIO:
+          snprintf(out, outLen, zh ? "录音已停止\n处理音频中..." :
+                                     "Recording stopped\nPreparing audio...");
+          break;
+        case VOICE_PROGRESS_UPLOADING_AUDIO:
+          snprintf(out, outLen, zh ? "上传音频中...\n请稍等" :
+                                     "Uploading audio...\nPlease wait");
+          break;
+        case VOICE_PROGRESS_TRANSCRIBING:
+          snprintf(out, outLen, zh ? "转录中...\n正在识别你的问题" :
+                                     "Transcribing...\nRecognizing speech");
+          break;
+        case VOICE_PROGRESS_GENERATING_RESPONSE:
+          snprintf(out, outLen, zh ? "转录完成\n生成响应中..." :
+                                     "Transcript ready\nGenerating response...");
+          break;
+        case VOICE_PROGRESS_NONE:
+        default:
+          snprintf(out, outLen, zh ? "处理中...\n请稍等" : "Processing...\nPlease wait");
+          break;
+      }
       break;
     case VOICE_STATE_SPEAKING:
       snprintf(out, outLen, zh ? "朗读中，按 A 可打断\n%s" : "Speaking; press A to interrupt\n%s",
@@ -1344,7 +1395,9 @@ void voice_service_status_text(char *out, size_t outLen) {
       snprintf(out, outLen, "%s", result[0] != '\0' ? result : (zh ? "完成" : "Done"));
       break;
     case VOICE_STATE_ERROR:
-      snprintf(out, outLen, "%s", error[0] != '\0' ? error : (zh ? "语音失败" : "Voice failed"));
+      snprintf(out, outLen, zh ? "语音失败\n%s\n双击 B 重试" :
+                                 "Voice failed\n%s\nDouble-click B to retry",
+               error[0] != '\0' ? error : "-");
       break;
     case VOICE_STATE_IDLE:
     default:
