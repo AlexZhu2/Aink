@@ -24,6 +24,7 @@ typedef struct {
   bool aqiValid;
   int usAqi;
   int pm25Tenths;
+  int pm10Tenths;
   struct {
     char label[8];
     int wday;

@@ -15,12 +15,14 @@
 #include "ui_home.h"
 #include "ui_weather.h"
 #include "ui_stock.h"
+#include "ui_stock_detail.h"
 #include "ui_settings.h"
 #include "ui_nav.h"
 #include "ui_answers.h"
 #include "ui_vision.h"
 #include "ui_voice.h"
 #include "ui_clock.h"
+#include "ui_life.h"
 #include "ui_status_bar.h"
 #include "ui_refresh.h"
 #include "settings_api.h"
@@ -1119,6 +1121,7 @@ static void startNormalOperation() {
   ui_vision_init();
   ui_voice_init();
   ui_clock_init();
+  ui_life_init();
   ui_settings_init();
   ui_nav_init();
   ui_lvgl_prepare();
@@ -1178,6 +1181,9 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
       ui_weather_refresh();
     } else if (ui_nav_is_stock()) {
       ui_stock_refresh();
+      if (ui_stock_detail_is_active()) {
+        ui_stock_detail_refresh();
+      }
     } else if (ui_nav_is_clock()) {
       ui_clock_refresh();
     } else if (ui_nav_is_answers()) {
@@ -1194,8 +1200,12 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
   const int wifiState = wifiConnected ? 1 : 0;
   WeatherSnapshot weather = {};
   weather_service_get_snapshot(&weather);
-  ui_status_bar_update(batteryPercent, wifiConnected,
-                       weather.valid, weather.icon, weather.tempC);
+  const bool showStatusBar = !ui_nav_hides_status_bar();
+  ui_status_bar_set_visible(showStatusBar);
+  if (showStatusBar) {
+    ui_status_bar_update(batteryPercent, wifiConnected,
+                         weather.valid, weather.icon, weather.tempC);
+  }
 
   ui_lvgl_prepare();
   if (fullLvgl) {
@@ -1407,6 +1417,16 @@ void loop() {
   UiRefreshMode voiceMode = UI_REFRESH_NONE;
   if (ui_voice_service(&voiceMode)) {
     requestDisplayRefresh(voiceMode);
+  }
+
+  UiRefreshMode lifeMode = UI_REFRESH_NONE;
+  if (ui_life_service(&lifeMode)) {
+    requestDisplayRefresh(lifeMode);
+  }
+
+  UiRefreshMode stockMode = UI_REFRESH_NONE;
+  if (ui_stock_service(&stockMode)) {
+    requestDisplayRefresh(stockMode);
   }
 
   const bool wifiConnected = isWifiConnected();

@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 void ui_status_bar_init(void);
+void ui_status_bar_set_visible(bool visible);
 void ui_status_bar_update(int batteryPercent, bool wifiConnected,
                           bool showWeather, WeatherIconKind weatherIcon,
                           int weatherTempC);

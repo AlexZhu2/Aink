@@ -5,17 +5,29 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define STOCK_MAX_ITEMS  5
+#define STOCK_MAX_ITEMS  6
 #define STOCK_SYMBOL_LEN 12
 #define STOCK_NAME_LEN   32
+
+/** UTF-8 for U+FFE5 fullwidth yuan (￥), matches project fonts. */
+#define STOCK_CURRENCY_YUAN_UTF8 "\xEF\xBF\xA5"
 
 typedef struct {
   char symbol[STOCK_SYMBOL_LEN];
   char name[STOCK_NAME_LEN];
   int priceX100;
   int changePctX10;
+  int changeAbsX100;
   bool quoteValid;
 } StockQuote;
+
+#define STOCK_INTRADAY_MAX 48
+
+typedef struct {
+  bool valid;
+  int count;
+  int16_t priceX100[STOCK_INTRADAY_MAX];
+} StockIntradaySeries;
 
 typedef struct {
   bool valid;
@@ -33,6 +45,12 @@ bool stock_service_retry_names(void);
 void stock_service_request_name_fetch(void);
 bool stock_service_consume_fresh_fetch(void);
 void stock_service_get_snapshot(StockSnapshot *out);
+int stock_service_get_count(void);
+const StockQuote *stock_service_get_quote(int index);
+bool stock_service_fetch_intraday(const char *userSymbol, StockIntradaySeries *out);
+void stock_service_format_price_plain(const StockQuote *quote, char *out, size_t outLen);
+void stock_service_format_price_detail(const StockQuote *quote, char *out, size_t outLen);
+void stock_service_format_change_detail(const StockQuote *quote, char *out, size_t outLen);
 
 /** Best item for launcher tile preview (largest |change| among valid quotes). */
 const StockQuote *stock_service_get_tile_preview(void);

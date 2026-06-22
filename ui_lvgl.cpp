@@ -94,6 +94,20 @@ void ui_lvgl_configure_screen(lv_obj_t *screen) {
   lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 }
 
+void ui_lvgl_configure_fullscreen(lv_obj_t *screen) {
+  if (screen == nullptr) {
+    return;
+  }
+  lv_obj_set_size(screen, EPD_1IN54_V2_WIDTH, EPD_1IN54_V2_HEIGHT);
+  lv_obj_set_style_bg_color(screen, lv_color_white(), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_pad_left(screen, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(screen, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(screen, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(screen, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+}
+
 void ui_lvgl_tick(void) {
   const uint32_t now = millis();
   lv_tick_inc(now - s_lastTickMs);
