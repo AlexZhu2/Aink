@@ -14,12 +14,14 @@
 #include "ui_home.h"
 #include "ui_weather.h"
 #include "ui_stock.h"
+#include "ui_stock_detail.h"
 #include "ui_settings.h"
 #include "ui_nav.h"
 #include "ui_answers.h"
 #include "ui_vision.h"
 #include "ui_voice.h"
 #include "ui_clock.h"
+#include "ui_life.h"
 #include "ui_refresh.h"
 #include "settings_api.h"
 #include "app_locale.h"
@@ -1123,6 +1125,7 @@ static void startNormalOperation() {
   ui_vision_init();
   ui_voice_init();
   ui_clock_init();
+  ui_life_init();
   ui_settings_init();
   ui_nav_init();
   ui_lvgl_prepare();
@@ -1340,6 +1343,9 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
       ui_weather_refresh();
     } else if (ui_nav_is_stock()) {
       ui_stock_refresh();
+      if (ui_stock_detail_is_active()) {
+        ui_stock_detail_refresh();
+      }
     } else if (ui_nav_is_clock()) {
       ui_clock_refresh();
     } else if (ui_nav_is_answers()) {
@@ -1574,6 +1580,16 @@ void loop() {
   UiRefreshMode voiceMode = UI_REFRESH_NONE;
   if (ui_voice_service(&voiceMode)) {
     requestDisplayRefresh(voiceMode);
+  }
+
+  UiRefreshMode lifeMode = UI_REFRESH_NONE;
+  if (ui_life_service(&lifeMode)) {
+    requestDisplayRefresh(lifeMode);
+  }
+
+  UiRefreshMode stockMode = UI_REFRESH_NONE;
+  if (ui_stock_service(&stockMode)) {
+    requestDisplayRefresh(stockMode);
   }
 
   const bool wifiConnected = isWifiConnected();

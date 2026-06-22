@@ -92,6 +92,7 @@ def main() -> None:
         raise SystemExit(f"Missing font: {FONT_PATH}")
     symbols = read_symbols()
     build(12, symbols)
+    subprocess.run([sys.executable, str(TOOLS / "build_clock_font.py")], check=True)
     print("Done.")
 
 

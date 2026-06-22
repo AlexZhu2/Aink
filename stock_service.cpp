@@ -48,6 +48,8 @@ static int s_nameCacheCount = 0;
 static char s_nameCacheWatchlistKey[128] = "";
 static bool s_nameCacheComplete = false;
 
+static void formatPriceAmount(int priceX100, char *out, size_t outLen);
+
 static bool isCnSymbol(const char *symbol) {
   if (symbol == nullptr) {
     return false;
@@ -306,6 +308,8 @@ static bool parseSinaQuoteLine(const char *sinaCode, const char *payload, StockM
     }
     outQuote->priceX100 = priceX100;
     outQuote->changePctX10 = changePctToX10(changeField);
+    outQuote->changeAbsX100 =
+        (int)((priceX100 * (int64_t)outQuote->changePctX10 + 500) / 1000);
   } else {
     char prevField[16];
     char priceField[16];
@@ -320,6 +324,7 @@ static bool parseSinaQuoteLine(const char *sinaCode, const char *payload, StockM
     }
     outQuote->priceX100 = priceX100;
     const int diffX100 = priceX100 - prevX100;
+    outQuote->changeAbsX100 = diffX100;
     outQuote->changePctX10 =
         (int)((diffX100 * 1000LL + (diffX100 >= 0 ? prevX100 / 2 : -(prevX100 / 2))) / prevX100);
   }
@@ -689,6 +694,7 @@ static bool parseSinaResponse(const StockRequestItem *items, int count, const St
     snprintf(quote->name, sizeof(quote->name), "%s", items[i].userSymbol);
     quote->priceX100 = 0;
     quote->changePctX10 = 0;
+    quote->changeAbsX100 = 0;
     quote->quoteValid = false;
 
     char marker[32];
@@ -803,6 +809,200 @@ void stock_service_get_snapshot(StockSnapshot *out) {
   *out = s_snapshot;
 }
 
+int stock_service_get_count(void) {
+  return s_snapshot.count;
+}
+
+const StockQuote *stock_service_get_quote(int index) {
+  if (index < 0 || index >= s_snapshot.count) {
+    return nullptr;
+  }
+  return &s_snapshot.items[index];
+}
+
+void stock_service_format_price_plain(const StockQuote *quote, char *out, size_t outLen) {
+  if (out == nullptr || outLen == 0) {
+    return;
+  }
+  out[0] = '\0';
+  if (quote == nullptr || !quote->quoteValid || quote->priceX100 < 0) {
+    snprintf(out, outLen, "--");
+    return;
+  }
+  formatPriceAmount(quote->priceX100, out, outLen);
+}
+
+void stock_service_format_price_detail(const StockQuote *quote, char *out, size_t outLen) {
+  if (out == nullptr || outLen == 0) {
+    return;
+  }
+  out[0] = '\0';
+  if (quote == nullptr || !quote->quoteValid || quote->priceX100 < 0) {
+    snprintf(out, outLen, "--");
+    return;
+  }
+
+  char amount[16];
+  formatPriceAmount(quote->priceX100, amount, sizeof(amount));
+  if (strcmp(amount, "--") == 0) {
+    snprintf(out, outLen, "--");
+    return;
+  }
+
+  if (stock_service_is_cn_symbol(quote->symbol)) {
+    snprintf(out, outLen, STOCK_CURRENCY_YUAN_UTF8 "%s", amount);
+  } else {
+    snprintf(out, outLen, "$%s", amount);
+  }
+}
+
+static void formatPctSigned(int changePctX10, char *out, size_t outLen) {
+  if (changePctX10 == 0) {
+    snprintf(out, outLen, "0.0%%");
+    return;
+  }
+  const char sign = changePctX10 > 0 ? '+' : '-';
+  const int absVal = abs(changePctX10);
+  const int whole = absVal / 10;
+  const int frac = absVal % 10;
+  if (frac == 0) {
+    snprintf(out, outLen, "%c%d.0%%", sign, whole);
+  } else {
+    snprintf(out, outLen, "%c%d.%d%%", sign, whole, frac);
+  }
+}
+
+void stock_service_format_change_detail(const StockQuote *quote, char *out, size_t outLen) {
+  if (out == nullptr || outLen == 0) {
+    return;
+  }
+  out[0] = '\0';
+  if (quote == nullptr || !quote->quoteValid) {
+    snprintf(out, outLen, "--");
+    return;
+  }
+
+  char absPart[16];
+  char pctPart[16];
+  const int absX100 = abs(quote->changeAbsX100);
+  formatPriceAmount(absX100, absPart, sizeof(absPart));
+  formatPctSigned(quote->changePctX10, pctPart, sizeof(pctPart));
+
+  if (quote->changeAbsX100 > 0) {
+    snprintf(out, outLen, "+%s (%s)", absPart, pctPart);
+  } else if (quote->changeAbsX100 < 0) {
+    snprintf(out, outLen, "-%s (%s)", absPart, pctPart);
+  } else {
+    snprintf(out, outLen, "0 (%s)", pctPart);
+  }
+}
+
+static bool parseCloseSeriesFromJson(const String &body, StockIntradaySeries *out) {
+  if (out == nullptr) {
+    return false;
+  }
+  out->count = 0;
+  out->valid = false;
+
+  const char *cursor = body.c_str();
+  while (out->count < STOCK_INTRADAY_MAX) {
+    const char *key = strstr(cursor, "\"close\"");
+    if (key == nullptr) {
+      break;
+    }
+    key += 7;
+    while (*key == ' ' || *key == ':' || *key == '\"') {
+      key++;
+    }
+    if (*key == '\0') {
+      break;
+    }
+
+    char *endPtr = nullptr;
+    const double closeVal = strtod(key, &endPtr);
+    if (endPtr == key || closeVal <= 0.0) {
+      cursor = key + 1;
+      continue;
+    }
+
+    out->priceX100[out->count++] = (int)(closeVal * 100.0 + 0.5);
+    cursor = endPtr;
+  }
+
+  out->valid = out->count >= 2;
+  return out->valid;
+}
+
+static bool httpGetText(const char *url, String *outBody) {
+  if (url == nullptr || outBody == nullptr || url[0] == '\0') {
+    return false;
+  }
+
+  HTTPClient http;
+  http.setConnectTimeout(8000);
+  http.setTimeout(STOCK_HTTP_TIMEOUT_MS);
+  if (!http.begin(url)) {
+    return false;
+  }
+  http.addHeader("Referer", "https://finance.sina.com.cn");
+
+  const int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("[Stock] intraday HTTP %d\r\n", httpCode);
+    http.end();
+    return false;
+  }
+
+  *outBody = http.getString();
+  http.end();
+  return outBody->length() > 0;
+}
+
+bool stock_service_fetch_intraday(const char *userSymbol, StockIntradaySeries *out) {
+  if (userSymbol == nullptr || out == nullptr) {
+    return false;
+  }
+  out->count = 0;
+  out->valid = false;
+
+  StockMarketKind market = STOCK_MARKET_CN;
+  char sinaCode[16];
+  if (!toSinaCode(userSymbol, sinaCode, sizeof(sinaCode), &market)) {
+    return false;
+  }
+
+  char url[256];
+  if (market == STOCK_MARKET_CN) {
+    snprintf(url, sizeof(url),
+             "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+             "CN_MarketData.getKLineData?symbol=%s&scale=5&ma=no&datalen=%d",
+             sinaCode, STOCK_INTRADAY_MAX);
+  } else {
+    char upper[8] = {};
+    for (size_t i = 0; userSymbol[i] != '\0' && i + 1 < sizeof(upper); i++) {
+      upper[i] = (char)toupper((unsigned char)userSymbol[i]);
+    }
+    snprintf(url, sizeof(url),
+             "http://stock.finance.sina.com.cn/usstock/api/json.php/"
+             "US_MinKLineService.getMinK?symbol=.%s&num=%d",
+             upper, STOCK_INTRADAY_MAX);
+  }
+
+  String body;
+  if (!httpGetText(url, &body)) {
+    Serial.println("[Stock] intraday fetch failed");
+    return false;
+  }
+
+  if (parseCloseSeriesFromJson(body, out)) {
+    Serial.printf("[Stock] intraday %s points=%d\r\n", userSymbol, out->count);
+    return true;
+  }
+
+  Serial.printf("[Stock] intraday parse empty for %s\r\n", userSymbol);
+  return false;
+}
+
 const StockQuote *stock_service_get_tile_preview(void) {
   if (!s_snapshot.valid || s_snapshot.count <= 0) {
     return nullptr;
@@ -873,7 +1073,7 @@ void stock_service_format_price(const StockQuote *quote, char *out, size_t outLe
   }
 
   if (stock_service_is_cn_symbol(quote->symbol)) {
-    snprintf(out, outLen, "\xEF\xBF\xA5%s", amount);
+    snprintf(out, outLen, STOCK_CURRENCY_YUAN_UTF8 "%s", amount);
   } else {
     snprintf(out, outLen, "$%s", amount);
   }

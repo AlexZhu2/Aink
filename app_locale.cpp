@@ -6,10 +6,12 @@
 #include "ui_home.h"
 #include "ui_settings.h"
 #include "ui_stock.h"
+#include "ui_stock_detail.h"
 #include "ui_weather.h"
 #include "ui_vision.h"
 #include "ui_voice.h"
 #include "ui_clock.h"
+#include "ui_life.h"
 
 static AppLanguage s_lang = APP_LANG_EN;
 
@@ -19,6 +21,7 @@ static const char *kStringsEn[TR_COUNT] = {
     "AI Vision",
     "Answers",
     "Stocks",
+    "Life",
     "Settings",
     "Online",
     "Offline",
@@ -36,6 +39,9 @@ static const char *kStringsEn[TR_COUNT] = {
     "Provider unsupported",
     "Book of Answers",
     "Press A to ask",
+
+    "A pause  B reseed",
+    "Paused - A run",
 
     "Settings",
     "WiFi",
@@ -95,6 +101,7 @@ static const char *kStringsEn[TR_COUNT] = {
     "Name",
     "Price",
     "Chg",
+    "No chart",
 
     "SUN",
     "MON",
@@ -111,6 +118,7 @@ static const char *kStringsZh[TR_COUNT] = {
     "AI识图",
     "答案之书",
     "股票",
+    "生命游戏",
     "设置",
     "在线",
     "离线",
@@ -128,6 +136,9 @@ static const char *kStringsZh[TR_COUNT] = {
     "提供商不支持",
     "答案之书",
     "观象/开口/随缘",
+
+    "A暂停 B随机",
+    "已暂停 A继续",
 
     "设置",
     "无线",
@@ -187,6 +198,7 @@ static const char *kStringsZh[TR_COUNT] = {
     "名称",
     "现价",
     "涨跌",
+    "暂无分时",
 
     "周日",
     "周一",
@@ -241,8 +253,12 @@ void app_locale_refresh_all(void) {
   ui_settings_refresh();
   ui_weather_refresh();
   ui_stock_refresh();
+  if (ui_stock_detail_is_active()) {
+    ui_stock_detail_refresh();
+  }
   ui_answers_refresh();
   ui_vision_refresh();
   ui_voice_refresh();
   ui_clock_refresh_locale();
+  ui_life_refresh_locale();
 }

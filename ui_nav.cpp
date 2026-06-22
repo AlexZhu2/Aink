@@ -9,6 +9,7 @@
 #include "ui_voice.h"
 #include "ui_weather.h"
 #include "ui_clock.h"
+#include "ui_life.h"
 #include "voice_service.h"
 
 #include <Arduino.h>
@@ -49,12 +50,19 @@ bool ui_nav_is_clock(void) {
   return !s_onHome && ui_clock_is_active();
 }
 
+bool ui_nav_is_life(void) {
+  return !s_onHome && ui_life_is_active();
+}
+
 static void go_home(UiRefreshMode *outRefreshMode) {
   if (ui_vision_is_active()) {
     ui_vision_leave();
   }
   if (ui_answers_is_active()) {
     ui_answers_leave();
+  }
+  if (ui_life_is_active()) {
+    ui_life_leave();
   }
   ui_home_show();
   s_onHome = true;
@@ -94,6 +102,8 @@ static void open_focused_tile(void) {
   } else if (focus == 4) {
     ui_stock_show();
   } else if (focus == 5) {
+    ui_life_show();
+  } else if (focus == 6) {
     ui_settings_show();
   } else {
     ui_detail_show(ui_home_focus_title(), app_tr(TR_COMING_SOON));
@@ -282,6 +292,36 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
   }
 
   if (ui_clock_is_active()) {
+    switch (action) {
+      case BTN_ACTION_BACK:
+        go_home(outRefreshMode);
+        return true;
+      case BTN_ACTION_VOICE_TOGGLE:
+        return open_voice_interaction(outRefreshMode);
+      default:
+        return false;
+    }
+  }
+
+  if (ui_life_is_active()) {
+    if (ui_life_handle(action, outRefreshMode)) {
+      return true;
+    }
+    switch (action) {
+      case BTN_ACTION_BACK:
+        go_home(outRefreshMode);
+        return true;
+      case BTN_ACTION_VOICE_TOGGLE:
+        return open_voice_interaction(outRefreshMode);
+      default:
+        return false;
+    }
+  }
+
+  if (ui_stock_is_active()) {
+    if (ui_stock_nav_handle(action, outRefreshMode)) {
+      return true;
+    }
     switch (action) {
       case BTN_ACTION_BACK:
         go_home(outRefreshMode);

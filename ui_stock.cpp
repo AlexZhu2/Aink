@@ -3,9 +3,16 @@
 #include "app_locale.h"
 #include "stock_service.h"
 #include "ui_fonts.h"
+#include "ui_stock_detail.h"
+#include "weather_service.h"
 
+#include <Arduino.h>
+#include <WiFi.h>
 #include <stdio.h>
 #include <string.h>
+
+#define STOCK_DETAIL_REFRESH_MS  (5UL * 60UL * 1000UL)
+#define STOCK_DETAIL_RETRY_MS    (60UL * 1000UL)
 
 #define STOCK_ARROW_PX     10
 #define STOCK_ROW_Y0       6
@@ -27,6 +34,8 @@ typedef struct {
 static lv_obj_t *s_screenStock = nullptr;
 static lv_obj_t *s_emptyLabel = nullptr;
 static StockRowUi s_rows[STOCK_MAX_ITEMS];
+static unsigned long s_nextDetailFetchMs = 0;
+static int s_listFocus = 0;
 
 static void style_label(lv_obj_t *label, const lv_font_t *font) {
   lv_obj_set_style_text_color(label, lv_color_black(), LV_PART_MAIN);
@@ -37,14 +46,19 @@ static void style_label(lv_obj_t *label, const lv_font_t *font) {
   }
 }
 
-static void style_row_panel(lv_obj_t *panel, bool inverted) {
+static void style_row_panel(lv_obj_t *panel, bool inverted, bool focused) {
   lv_obj_set_style_bg_color(panel, inverted ? lv_color_black() : lv_color_white(), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_border_width(panel, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(panel, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(panel, 0, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(panel, 0, LV_PART_MAIN);
   lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+  if (focused) {
+    lv_obj_set_style_border_width(panel, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_color(panel, inverted ? lv_color_white() : lv_color_black(), LV_PART_MAIN);
+  } else {
+    lv_obj_set_style_border_width(panel, 0, LV_PART_MAIN);
+  }
 }
 
 static void style_change_box(lv_obj_t *box, bool filled) {
@@ -137,7 +151,7 @@ static StockRowUi *create_stock_row(lv_obj_t *parent, int index) {
   row->rowPanel = lv_obj_create(parent);
   lv_obj_set_size(row->rowPanel, STOCK_CONTENT_W, STOCK_ROW_H);
   lv_obj_set_pos(row->rowPanel, 6, y);
-  style_row_panel(row->rowPanel, false);
+  style_row_panel(row->rowPanel, false, false);
 
   row->arrowCanvas = lv_canvas_create(row->rowPanel);
   lv_canvas_set_buffer(row->arrowCanvas, row->arrowBuf, STOCK_ARROW_PX, STOCK_ARROW_PX,
@@ -174,7 +188,7 @@ static StockRowUi *create_stock_row(lv_obj_t *parent, int index) {
   return row;
 }
 
-static void bind_row(StockRowUi *row, const StockQuote *q, bool showData) {
+static void bind_row(StockRowUi *row, const StockQuote *q, bool showData, bool focused) {
   char label[STOCK_NAME_LEN];
   char price[20];
   const lv_color_t black = lv_color_black();
@@ -187,7 +201,7 @@ static void bind_row(StockRowUi *row, const StockQuote *q, bool showData) {
   stock_service_format_display_label(q, label, sizeof(label));
 
   if (!showData || !q->quoteValid) {
-    style_row_panel(row->rowPanel, false);
+    style_row_panel(row->rowPanel, false, focused);
     canvas_draw_arrow(row->arrowCanvas, 0, false);
     lv_label_set_text(row->nameLabel, label);
     lv_label_set_text(row->priceLabel, "--");
@@ -212,7 +226,7 @@ static void bind_row(StockRowUi *row, const StockQuote *q, bool showData) {
   lv_label_set_text(row->changeLabel, change);
 
   if (down) {
-    style_row_panel(row->rowPanel, true);
+    style_row_panel(row->rowPanel, true, focused);
     lv_obj_set_style_text_color(row->nameLabel, white, LV_PART_MAIN);
     lv_obj_set_style_text_color(row->priceLabel, white, LV_PART_MAIN);
     style_change_box(row->changeBox, false);
@@ -220,13 +234,13 @@ static void bind_row(StockRowUi *row, const StockQuote *q, bool showData) {
     lv_obj_set_style_border_width(row->changeBox, 0, LV_PART_MAIN);
     lv_obj_set_style_text_color(row->changeLabel, white, LV_PART_MAIN);
   } else if (up) {
-    style_row_panel(row->rowPanel, false);
+    style_row_panel(row->rowPanel, false, focused);
     lv_obj_set_style_text_color(row->nameLabel, black, LV_PART_MAIN);
     lv_obj_set_style_text_color(row->priceLabel, black, LV_PART_MAIN);
     style_change_box(row->changeBox, true);
     lv_obj_set_style_text_color(row->changeLabel, white, LV_PART_MAIN);
   } else {
-    style_row_panel(row->rowPanel, false);
+    style_row_panel(row->rowPanel, false, focused);
     lv_obj_set_style_text_color(row->nameLabel, black, LV_PART_MAIN);
     lv_obj_set_style_text_color(row->priceLabel, black, LV_PART_MAIN);
     style_change_box(row->changeBox, false);
@@ -249,6 +263,13 @@ static void bind_stock_data(void) {
     }
   }
 
+  if (hasRows && s_listFocus >= snap.count) {
+    s_listFocus = snap.count - 1;
+  }
+  if (s_listFocus < 0) {
+    s_listFocus = 0;
+  }
+
   for (int i = 0; i < STOCK_MAX_ITEMS; i++) {
     if (i >= snap.count) {
       lv_obj_add_flag(s_rows[i].rowPanel, LV_OBJ_FLAG_HIDDEN);
@@ -257,7 +278,7 @@ static void bind_stock_data(void) {
     }
 
     lv_obj_clear_flag(s_rows[i].rowPanel, LV_OBJ_FLAG_HIDDEN);
-    bind_row(&s_rows[i], &snap.items[i], hasQuotes);
+    bind_row(&s_rows[i], &snap.items[i], hasQuotes, i == s_listFocus);
 
     if (i < snap.count - 1) {
       lv_obj_clear_flag(s_rows[i].divider, LV_OBJ_FLAG_HIDDEN);
@@ -290,17 +311,61 @@ void ui_stock_init(void) {
   lv_obj_add_flag(s_emptyLabel, LV_OBJ_FLAG_HIDDEN);
 
   bind_stock_data();
+  ui_stock_detail_init();
 }
 
 void ui_stock_show(void) {
   stock_service_update(true);
+  s_listFocus = 0;
+  s_nextDetailFetchMs = millis() + STOCK_DETAIL_REFRESH_MS;
   bind_stock_data();
   lv_scr_load(s_screenStock);
   lv_obj_invalidate(s_screenStock);
 }
 
-void ui_stock_refresh(void) {
+bool ui_stock_service(UiRefreshMode *outRefreshMode) {
+  if (outRefreshMode != nullptr) {
+    *outRefreshMode = UI_REFRESH_NONE;
+  }
   if (!ui_stock_is_active()) {
+    return false;
+  }
+
+  const unsigned long now = millis();
+  if (now < s_nextDetailFetchMs) {
+    return false;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    s_nextDetailFetchMs = now + STOCK_DETAIL_RETRY_MS;
+    return false;
+  }
+  if (weather_service_is_busy()) {
+    return false;
+  }
+
+  Serial.println("[Stock] detail periodic fetch");
+  stock_service_update(true);
+  if (stock_service_consume_fresh_fetch()) {
+    if (ui_stock_detail_is_active()) {
+      ui_stock_detail_refresh();
+      ui_stock_detail_refresh_chart();
+    } else {
+      ui_stock_refresh();
+    }
+    s_nextDetailFetchMs = now + STOCK_DETAIL_REFRESH_MS;
+    if (outRefreshMode != nullptr) {
+      *outRefreshMode = UI_REFRESH_QUALITY;
+    }
+    return true;
+  }
+
+  s_nextDetailFetchMs = now + STOCK_DETAIL_RETRY_MS;
+  return false;
+}
+
+void ui_stock_refresh(void) {
+  if (!ui_stock_is_list_active()) {
     return;
   }
   if (s_emptyLabel != nullptr) {
@@ -310,8 +375,59 @@ void ui_stock_refresh(void) {
   lv_obj_invalidate(s_screenStock);
 }
 
-bool ui_stock_is_active(void) {
+bool ui_stock_is_list_active(void) {
   return s_screenStock != nullptr && lv_scr_act() == s_screenStock;
+}
+
+bool ui_stock_is_active(void) {
+  return ui_stock_is_list_active() || ui_stock_detail_is_active();
+}
+
+bool ui_stock_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
+  if (ui_stock_detail_is_active()) {
+    if (action == BTN_ACTION_BACK) {
+      ui_stock_detail_back_to_list(outRefreshMode);
+      lv_scr_load(s_screenStock);
+      ui_stock_refresh();
+      return true;
+    }
+    return false;
+  }
+
+  if (!ui_stock_is_list_active()) {
+    return false;
+  }
+
+  StockSnapshot snap = {};
+  stock_service_get_snapshot(&snap);
+  if (snap.count <= 0) {
+    return false;
+  }
+
+  switch (action) {
+    case BTN_ACTION_NEXT:
+      s_listFocus = (s_listFocus + 1) % snap.count;
+      ui_stock_refresh();
+      if (outRefreshMode != nullptr) {
+        *outRefreshMode = UI_REFRESH_FAST;
+      }
+      return true;
+    case BTN_ACTION_PREV:
+      s_listFocus = (s_listFocus + snap.count - 1) % snap.count;
+      ui_stock_refresh();
+      if (outRefreshMode != nullptr) {
+        *outRefreshMode = UI_REFRESH_FAST;
+      }
+      return true;
+    case BTN_ACTION_CONFIRM:
+      ui_stock_detail_show(s_listFocus);
+      if (outRefreshMode != nullptr) {
+        *outRefreshMode = UI_REFRESH_NAV;
+      }
+      return true;
+    default:
+      return false;
+  }
 }
 
 lv_obj_t *ui_stock_get_screen(void) {

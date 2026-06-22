@@ -22,6 +22,7 @@ desktop.ini
 test.jpg
 *.jpg
 *.png
+docs/*
 
 # Local font sources (generated aink_*.c is committed)
 tools/fonts/
