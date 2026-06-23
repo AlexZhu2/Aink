@@ -23,6 +23,8 @@ test.jpg
 *.jpg
 *.png
 !assets/logo-circuit-ink.png
+!icon/
+!icon/*.png
 docs/*
 
 # Local font sources (generated aink_*.c is committed)
