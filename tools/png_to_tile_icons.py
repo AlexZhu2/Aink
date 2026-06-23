@@ -28,11 +28,53 @@ RASTER_SIZE = 512
 THRESHOLD = 200
 
 ICON_FILES = [
-    ("settings_gear_bitmap", "gear.png", "Gear outline (settings tile).", True),
-    ("vision_eye_bitmap", "eye.png", "Eye outline (AI vision tile).", True),
-    ("answerbook_bitmap", "answerbook.svg", "Book icon (answers tile).", False),
-    ("stock_chart_bitmap", "stock.svg", "Stock chart outline (stocks tile).", True),
-    ("clock_face_bitmap", "clock.svg", "Analog clock outline (clock tile).", True),
+    ("settings_gear_bitmap", "icon/settings32.png", "Gear outline (settings tile).", True),
+    ("vision_eye_bitmap", "icon/photo-camera32.png", "Camera icon (AI vision tile).", False),
+    ("answerbook_bitmap", "icon/spell-book32.png", "Book icon (answers tile).", False),
+    ("stock_chart_bitmap", "icon/stocks32.png", "Stock chart icon (stocks tile).", False),
+    ("clock_face_bitmap", "icon/clock.png", "Clock icon (clock tile).", False),
+    ("weather_tile_bitmap", "icon/weather32.png", "Weather icon (weather tile).", False),
+]
+
+STATIC_BITMAPS = [
+    (
+        "life_grid_bitmap",
+        "4x4 grid (Conway Life tile).",
+        [
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x06600660,
+            0x09900990,
+            0x06600660,
+            0x00000000,
+            0x06600660,
+            0x09900990,
+            0x06600660,
+            0x00000000,
+            0x06600660,
+            0x09900990,
+            0x06600660,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+        ],
+    ),
 ]
 
 
@@ -250,6 +292,14 @@ def main() -> None:
             sys.exit(1)
 
         lines.append(f"/** {comment} Source: {filename} */")
+        lines.append(f"static const uint32_t {var_name}[SETTINGS_ICON_SIZE] = {{")
+        for mask in masks:
+            lines.append(f"  0x{mask:08X}u,")
+        lines.append("};")
+        lines.append("")
+
+    for var_name, comment, masks in STATIC_BITMAPS:
+        lines.append(f"/** {comment} */")
         lines.append(f"static const uint32_t {var_name}[SETTINGS_ICON_SIZE] = {{")
         for mask in masks:
             lines.append(f"  0x{mask:08X}u,")
