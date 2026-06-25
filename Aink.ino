@@ -28,6 +28,7 @@
 #include "settings_api.h"
 #include "app_locale.h"
 #include "voice_service.h"
+#include "speaker_service.h"
 
 extern "C" {
 #include "qrcode.h"
@@ -1125,6 +1126,9 @@ static void startNormalOperation() {
   ui_settings_init();
   ui_nav_init();
   ui_lvgl_prepare();
+
+  speaker_service_init();
+  speaker_service_play_boot_chime_async();
 
   requestDisplayRefresh(UI_REFRESH_NAV);
 }

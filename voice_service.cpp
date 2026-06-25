@@ -3,6 +3,7 @@
 #include "ai_model_config.h"
 #include "app_locale.h"
 #include "settings_api.h"
+#include "speaker_service.h"
 
 #include <Arduino.h>
 #include <ESP_I2S.h>
@@ -1128,7 +1129,7 @@ static void voice_pipeline_task(void *param) {
   s_task = nullptr;
   portEXIT_CRITICAL(&s_voiceMux);
   Serial.printf("[Voice] result: %s\r\n", result);
-  Serial.println("[Voice] speaker playback placeholder active");
+  speaker_service_play_notify_async();
   vTaskDelete(nullptr);
 }
 
@@ -1169,6 +1170,7 @@ bool voice_service_interrupt_speaker(void) {
   }
   portEXIT_CRITICAL(&s_voiceMux);
   if (interrupted) {
+    speaker_service_stop();
     Serial.println("[Voice] speaker interrupted");
   }
   return interrupted;

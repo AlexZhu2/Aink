@@ -19,6 +19,8 @@ typedef enum {
 
 bool camera_service_init(void);
 bool camera_service_start_preview(void);
+/** Higher-resolution grayscale preview for fullscreen vision UI (240x240). */
+bool camera_service_start_preview_large(void);
 bool camera_service_start_photo(void);
 bool camera_service_is_ready(void);
 CameraServiceMode camera_service_mode(void);
@@ -41,6 +43,13 @@ bool camera_service_set_framesize(framesize_t size);
  * Caller must free(*outRgb) with free().
  */
 bool camera_service_frame_to_rgb888(const camera_fb_t *fb, uint8_t **outRgb, size_t *outSize);
+
+/**
+ * Convert a captured frame to a WxH 1bpp bitmap using ordered Bayer dithering.
+ * Output bit value: 1 = white, 0 = black.
+ */
+bool camera_service_frame_to_mono_bitmap(const camera_fb_t *fb, int outW, int outH,
+                                         uint8_t *outBits, size_t outBitsLen);
 
 /**
  * Convert a captured frame to a 100x100 1bpp preview bitmap.
