@@ -40,6 +40,8 @@ void stock_service_invalidate_name_cache(void);
 void stock_service_reset(void);
 void stock_service_update(bool force);
 void stock_service_update_prices(bool force);
+void stock_service_request_update(bool force);
+bool stock_service_is_busy(void);
 bool stock_service_needs_name_fetch(void);
 bool stock_service_retry_names(void);
 void stock_service_request_name_fetch(void);
