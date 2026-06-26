@@ -22,7 +22,7 @@
 #define WEATHER_HTTP_CONNECT_MS    30000
 #define WEATHER_HTTP_OPTIONAL_MS   20000
 #define WEATHER_TASK_POLL_MS       250
-#define WEATHER_TASK_STACK_BYTES   12288
+#define WEATHER_TASK_STACK_BYTES   8192
 
 static WeatherSnapshot s_snapshot = {};
 static unsigned long s_lastFetchMs = 0;
@@ -1018,6 +1018,11 @@ static void weather_service_ensure_task(void) {
                   nullptr, 1, &s_weatherTask) != pdPASS) {
     Serial.println("[Weather] task create failed");
     s_weatherTask = nullptr;
+  } else {
+    Serial.printf("[Weather] task stack in internal RAM (%u bytes) internal=%u psram=%u\r\n",
+                  (unsigned)WEATHER_TASK_STACK_BYTES,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   }
 }
 
