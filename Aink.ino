@@ -290,8 +290,16 @@ static void requestNetworkWeatherFetch(bool force) {
   }
 }
 
+static unsigned long dnsLastFailMs = 0;
+#define DNS_RETRY_INTERVAL_MS  30000UL
+
 static void configureStationDns(void) {
   if (networkDnsConfigured || !isWifiConnected()) {
+    return;
+  }
+
+  const unsigned long now = millis();
+  if (dnsLastFailMs != 0 && (now - dnsLastFailMs) < DNS_RETRY_INTERVAL_MS) {
     return;
   }
 
@@ -309,8 +317,10 @@ static void configureStationDns(void) {
     Serial.printf("[WiFi] MiMo DNS api.xiaomimimo.com -> %s\n",
                   mimoIp.toString().c_str());
     networkDnsConfigured = true;
+    dnsLastFailMs = 0;
   } else {
     Serial.println("[WiFi] MiMo DNS lookup failed");
+    dnsLastFailMs = now;
   }
 }
 
@@ -385,6 +395,7 @@ static void serviceNetworkStateMachine(bool allowBlockingWork) {
 
   if (!wifiConnected) {
     networkDnsConfigured = false;
+    dnsLastFailMs = 0;
     if (hasStoredWiFiCredentials() && now >= nextWifiAttemptMs) {
       if (!startStoredWiFiConnect()) {
         nextWifiAttemptMs = now + WIFI_RECONNECT_BACKOFF_MS;
@@ -418,13 +429,15 @@ static void serviceNetworkStateMachine(bool allowBlockingWork) {
     requestDisplayRefresh(UI_REFRESH_QUALITY);
   }
 
-  if (allowBlockingWork && !weather_service_is_busy()) {
+  if (allowBlockingWork && !weather_service_is_busy() &&
+      networkDnsConfigured && !stock_service_is_busy()) {
     const bool stockForce = networkStockForcePending;
     networkStockForcePending = false;
-    stock_service_update(stockForce);
-    if (stock_service_consume_fresh_fetch()) {
-      requestDisplayRefresh(UI_REFRESH_QUALITY);
-    }
+    stock_service_request_update(stockForce);
+  }
+
+  if (stock_service_consume_fresh_fetch()) {
+    requestDisplayRefresh(UI_REFRESH_QUALITY);
   }
 }
 
