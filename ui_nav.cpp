@@ -237,6 +237,16 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
         if (ui_answers_is_busy()) {
           return false;
         }
+        if (ui_vision_is_busy()) {
+          return false;
+        }
+        if (ui_vision_is_result_view()) {
+          ui_vision_restart_preview();
+          if (outRefreshMode != nullptr) {
+            *outRefreshMode = UI_REFRESH_NAV;
+          }
+          return true;
+        }
         if (ui_vision_request_capture()) {
           ui_vision_set_busy();
           if (outRefreshMode != nullptr) {
@@ -297,6 +307,8 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
 
   if (ui_clock_is_active()) {
     switch (action) {
+      case BTN_ACTION_NEXT:
+        return ui_clock_handle_btn(action, outRefreshMode);
       case BTN_ACTION_BACK:
         go_home(outRefreshMode);
         return true;

@@ -14,6 +14,7 @@
 
 static bool s_ready = false;
 static CameraServiceMode s_mode = CAMERA_SERVICE_MODE_OFF;
+static framesize_t s_previewFrameSize = FRAMESIZE_INVALID;
 static StaticSemaphore_t s_cameraMutexStorage;
 static SemaphoreHandle_t s_cameraMutex = nullptr;
 static portMUX_TYPE s_cameraMutexMux = portMUX_INITIALIZER_UNLOCKED;
@@ -39,7 +40,7 @@ static void setupLedFlash(int pin) {
 #endif
 }
 
-static camera_config_t buildConfig(CameraServiceMode mode, bool usePsram) {
+static camera_config_t buildConfig(CameraServiceMode mode, bool usePsram, framesize_t previewSize) {
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -60,7 +61,7 @@ static camera_config_t buildConfig(CameraServiceMode mode, bool usePsram) {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = mode == CAMERA_SERVICE_MODE_PREVIEW ? FRAMESIZE_128X128 : FRAMESIZE_240X240;
+  config.frame_size = mode == CAMERA_SERVICE_MODE_PREVIEW ? previewSize : FRAMESIZE_240X240;
   config.pixel_format = mode == CAMERA_SERVICE_MODE_PREVIEW ? PIXFORMAT_GRAYSCALE : PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.jpeg_quality = 24;
@@ -94,14 +95,17 @@ static void applySensorDefaults(framesize_t frameSize) {
   sensor->set_framesize(sensor, frameSize);
 }
 
-static bool startCameraMode(CameraServiceMode mode) {
+static bool startCameraMode(CameraServiceMode mode, framesize_t previewSize = FRAMESIZE_128X128) {
   if (s_ready && s_mode == mode) {
-    return true;
+    if (mode != CAMERA_SERVICE_MODE_PREVIEW || s_previewFrameSize == previewSize) {
+      return true;
+    }
   }
   if (s_ready) {
     esp_camera_deinit();
     s_ready = false;
     s_mode = CAMERA_SERVICE_MODE_OFF;
+    s_previewFrameSize = FRAMESIZE_INVALID;
   }
 
   const bool hasPsram = psramFound();
@@ -113,21 +117,25 @@ static bool startCameraMode(CameraServiceMode mode) {
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
-  camera_config_t config = buildConfig(mode, hasPsram);
+  camera_config_t config = buildConfig(mode, hasPsram, previewSize);
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK && mode == CAMERA_SERVICE_MODE_PHOTO && hasPsram) {
     Serial.printf("[Camera] photo PSRAM init failed 0x%x, retrying in DRAM fb_count=1\r\n", err);
     esp_camera_deinit();
-    config = buildConfig(mode, false);
+    config = buildConfig(mode, false, previewSize);
     config.fb_count = 1;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     err = esp_camera_init(&config);
   }
   if (err != ESP_OK && mode == CAMERA_SERVICE_MODE_PREVIEW) {
+    if (previewSize == FRAMESIZE_240X240) {
+      Serial.printf("[Camera] preview 240x240 gray init failed 0x%x, retrying 128x128\r\n", err);
+      esp_camera_deinit();
+      return startCameraMode(mode, FRAMESIZE_128X128);
+    }
     Serial.printf("[Camera] preview 128x128 gray init failed 0x%x, retrying 96x96\r\n", err);
     esp_camera_deinit();
-    config = buildConfig(mode, false);
-    config.frame_size = FRAMESIZE_96X96;
+    config = buildConfig(mode, false, FRAMESIZE_96X96);
     err = esp_camera_init(&config);
   }
   if (err != ESP_OK) {
@@ -144,9 +152,18 @@ static bool startCameraMode(CameraServiceMode mode) {
 
   s_ready = true;
   s_mode = mode;
-  Serial.printf("[Camera] ready (%s %s)\r\n",
-                preview ? (config.frame_size == FRAMESIZE_96X96 ? "96x96" : "128x128") : "240x240",
-                preview ? "GRAY" : "JPEG");
+  s_previewFrameSize = preview ? config.frame_size : FRAMESIZE_INVALID;
+  if (preview) {
+    const char *sizeLabel = "128x128";
+    if (config.frame_size == FRAMESIZE_96X96) {
+      sizeLabel = "96x96";
+    } else if (config.frame_size == FRAMESIZE_240X240) {
+      sizeLabel = "240x240";
+    }
+    Serial.printf("[Camera] ready (%s GRAY)\r\n", sizeLabel);
+  } else {
+    Serial.printf("[Camera] ready (240x240 JPEG)\r\n");
+  }
   return true;
 }
 
@@ -155,7 +172,11 @@ bool camera_service_init(void) {
 }
 
 bool camera_service_start_preview(void) {
-  return startCameraMode(CAMERA_SERVICE_MODE_PREVIEW);
+  return startCameraMode(CAMERA_SERVICE_MODE_PREVIEW, FRAMESIZE_128X128);
+}
+
+bool camera_service_start_preview_large(void) {
+  return startCameraMode(CAMERA_SERVICE_MODE_PREVIEW, FRAMESIZE_240X240);
 }
 
 bool camera_service_start_photo(void) {
@@ -192,6 +213,7 @@ void camera_service_pause(void) {
   esp_camera_deinit();
   s_ready = false;
   s_mode = CAMERA_SERVICE_MODE_OFF;
+  s_previewFrameSize = FRAMESIZE_INVALID;
 }
 
 camera_fb_t *camera_service_capture(void) {
@@ -252,52 +274,49 @@ bool camera_service_frame_to_rgb888(const camera_fb_t *fb, uint8_t **outRgb, siz
   return true;
 }
 
-bool camera_service_frame_to_mono_preview100(const camera_fb_t *fb, uint8_t *outBits, size_t outBitsLen) {
-  if (fb == nullptr || outBits == nullptr || outBitsLen < CAMERA_PREVIEW_BYTES) {
+static const uint8_t kBayer4[4][4] = {
+    {0, 8, 2, 10},
+    {12, 4, 14, 6},
+    {3, 11, 1, 9},
+    {15, 7, 13, 5},
+};
+
+static bool mono_bayer_from_gray(const uint8_t *gray, int srcW, int srcH,
+                                 int outW, int outH, uint8_t *outBits, size_t outBitsLen) {
+  const size_t needed = ((size_t)outW * outH + 7U) / 8U;
+  if (gray == nullptr || outBits == nullptr || outBitsLen < needed || outW <= 0 || outH <= 0) {
     return false;
   }
-  if (fb->width == 0 || fb->height == 0) {
-    return false;
-  }
 
-  memset(outBits, 0xFF, CAMERA_PREVIEW_BYTES);
-
-  static const uint8_t kBayer4[4][4] = {
-      {0, 8, 2, 10},
-      {12, 4, 14, 6},
-      {3, 11, 1, 9},
-      {15, 7, 13, 5},
-  };
-
-  if ((fb->format == PIXFORMAT_GRAYSCALE || fb->format == PIXFORMAT_RAW8) &&
-      fb->len >= fb->width * fb->height) {
-    for (int y = 0; y < CAMERA_PREVIEW_HEIGHT; y++) {
-      const int srcY = (y * (int)fb->height) / CAMERA_PREVIEW_HEIGHT;
-      for (int x = 0; x < CAMERA_PREVIEW_WIDTH; x++) {
-        const int srcX = (x * (int)fb->width) / CAMERA_PREVIEW_WIDTH;
-        const size_t srcIndex = (size_t)srcY * fb->width + srcX;
-        const int luma = fb->buf[srcIndex];
-        const int threshold = 96 + (int)kBayer4[y & 0x03][x & 0x03] * 4;
-        if (luma < threshold) {
-          const int bitIndex = y * CAMERA_PREVIEW_WIDTH + x;
-          outBits[bitIndex / 8] &= (uint8_t)~(0x80 >> (bitIndex % 8));
-        }
+  memset(outBits, 0xFF, needed);
+  for (int y = 0; y < outH; y++) {
+    const int srcY = (y * srcH) / outH;
+    for (int x = 0; x < outW; x++) {
+      const int srcX = (x * srcW) / outW;
+      const int luma = gray[(size_t)srcY * srcW + srcX];
+      const int threshold = 96 + (int)kBayer4[y & 0x03][x & 0x03] * 4;
+      if (luma < threshold) {
+        const int bitIndex = y * outW + x;
+        outBits[bitIndex / 8] &= (uint8_t)~(0x80 >> (bitIndex % 8));
       }
     }
-    return true;
   }
+  return true;
+}
 
-  uint8_t *rgb = nullptr;
-  size_t rgbSize = 0;
-  if (!camera_service_frame_to_rgb888(fb, &rgb, &rgbSize)) {
+static bool mono_bayer_from_rgb(const uint8_t *rgb, int srcW, int srcH, size_t rgbSize,
+                                int outW, int outH, uint8_t *outBits, size_t outBitsLen) {
+  const size_t needed = ((size_t)outW * outH + 7U) / 8U;
+  if (rgb == nullptr || outBits == nullptr || outBitsLen < needed || outW <= 0 || outH <= 0) {
     return false;
   }
 
-  for (int y = 0; y < CAMERA_PREVIEW_HEIGHT; y++) {
-    const int srcY = (y * (int)fb->height) / CAMERA_PREVIEW_HEIGHT;
-    for (int x = 0; x < CAMERA_PREVIEW_WIDTH; x++) {
-      const int srcX = (x * (int)fb->width) / CAMERA_PREVIEW_WIDTH;
-      const size_t srcIndex = ((size_t)srcY * fb->width + srcX) * 3;
+  memset(outBits, 0xFF, needed);
+  for (int y = 0; y < outH; y++) {
+    const int srcY = (y * srcH) / outH;
+    for (int x = 0; x < outW; x++) {
+      const int srcX = (x * srcW) / outW;
+      const size_t srcIndex = ((size_t)srcY * srcW + srcX) * 3;
       if (srcIndex + 2 >= rgbSize) {
         continue;
       }
@@ -307,14 +326,42 @@ bool camera_service_frame_to_mono_preview100(const camera_fb_t *fb, uint8_t *out
       const uint8_t b = rgb[srcIndex + 2];
       const int luma = (77 * r + 150 * g + 29 * b) >> 8;
       const int threshold = 96 + (int)kBayer4[y & 0x03][x & 0x03] * 4;
-      const bool black = luma < threshold;
-      if (black) {
-        const int bitIndex = y * CAMERA_PREVIEW_WIDTH + x;
+      if (luma < threshold) {
+        const int bitIndex = y * outW + x;
         outBits[bitIndex / 8] &= (uint8_t)~(0x80 >> (bitIndex % 8));
       }
     }
   }
-
-  free(rgb);
   return true;
+}
+
+bool camera_service_frame_to_mono_bitmap(const camera_fb_t *fb, int outW, int outH,
+                                         uint8_t *outBits, size_t outBitsLen) {
+  if (fb == nullptr || outBits == nullptr || outW <= 0 || outH <= 0) {
+    return false;
+  }
+  if (fb->width == 0 || fb->height == 0) {
+    return false;
+  }
+
+  if ((fb->format == PIXFORMAT_GRAYSCALE || fb->format == PIXFORMAT_RAW8) &&
+      fb->len >= (size_t)fb->width * fb->height) {
+    return mono_bayer_from_gray(fb->buf, fb->width, fb->height, outW, outH, outBits, outBitsLen);
+  }
+
+  uint8_t *rgb = nullptr;
+  size_t rgbSize = 0;
+  if (!camera_service_frame_to_rgb888(fb, &rgb, &rgbSize)) {
+    return false;
+  }
+
+  const bool ok = mono_bayer_from_rgb(rgb, fb->width, fb->height, rgbSize,
+                                      outW, outH, outBits, outBitsLen);
+  free(rgb);
+  return ok;
+}
+
+bool camera_service_frame_to_mono_preview100(const camera_fb_t *fb, uint8_t *outBits, size_t outBitsLen) {
+  return camera_service_frame_to_mono_bitmap(fb, CAMERA_PREVIEW_WIDTH, CAMERA_PREVIEW_HEIGHT,
+                                             outBits, outBitsLen);
 }

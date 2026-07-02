@@ -48,6 +48,15 @@ static int s_nameCacheCount = 0;
 static char s_nameCacheWatchlistKey[128] = "";
 static bool s_nameCacheComplete = false;
 
+static portMUX_TYPE s_stockMux = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t s_stockTask = nullptr;
+static bool s_updateRequested = false;
+static bool s_forceRequested = false;
+static bool s_updateBusy = false;
+
+#define STOCK_TASK_STACK_BYTES  8192
+#define STOCK_TASK_POLL_MS      250
+
 static void formatPriceAmount(int priceX100, char *out, size_t outLen);
 
 static bool isCnSymbol(const char *symbol) {
@@ -795,10 +804,13 @@ void stock_service_reset(void) {
 }
 
 bool stock_service_consume_fresh_fetch(void) {
+  portENTER_CRITICAL(&s_stockMux);
   if (!s_freshFetchPending) {
+    portEXIT_CRITICAL(&s_stockMux);
     return false;
   }
   s_freshFetchPending = false;
+  portEXIT_CRITICAL(&s_stockMux);
   return true;
 }
 
@@ -806,7 +818,9 @@ void stock_service_get_snapshot(StockSnapshot *out) {
   if (out == nullptr) {
     return;
   }
+  portENTER_CRITICAL(&s_stockMux);
   *out = s_snapshot;
+  portEXIT_CRITICAL(&s_stockMux);
 }
 
 int stock_service_get_count(void) {
@@ -1148,9 +1162,11 @@ void stock_service_update(bool force) {
   s_lastAttemptMs = now;
   StockSnapshot fresh = {};
   if (fetchStocks(&fresh)) {
+    portENTER_CRITICAL(&s_stockMux);
     s_snapshot = fresh;
     s_lastFetchMs = now;
     s_freshFetchPending = true;
+    portEXIT_CRITICAL(&s_stockMux);
     Serial.println("[Stock] fetch complete");
   }
 }
@@ -1195,4 +1211,59 @@ bool stock_service_retry_names(void) {
 }
 
 void stock_service_request_name_fetch(void) {
+}
+
+static void stock_service_task(void *param) {
+  (void)param;
+  for (;;) {
+    bool shouldUpdate = false;
+    bool force = false;
+
+    portENTER_CRITICAL(&s_stockMux);
+    if (s_updateRequested && !s_updateBusy) {
+      shouldUpdate = true;
+      force = s_forceRequested;
+      s_updateRequested = false;
+      s_forceRequested = false;
+      s_updateBusy = true;
+    }
+    portEXIT_CRITICAL(&s_stockMux);
+
+    if (shouldUpdate) {
+      stock_service_update(force);
+      portENTER_CRITICAL(&s_stockMux);
+      s_updateBusy = false;
+      portEXIT_CRITICAL(&s_stockMux);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(STOCK_TASK_POLL_MS));
+  }
+}
+
+static void stock_service_ensure_task(void) {
+  if (s_stockTask != nullptr) {
+    return;
+  }
+  if (xTaskCreate(stock_service_task, "stock", STOCK_TASK_STACK_BYTES,
+                  nullptr, 1, &s_stockTask) != pdPASS) {
+    Serial.println("[Stock] task create failed");
+    s_stockTask = nullptr;
+  }
+}
+
+void stock_service_request_update(bool force) {
+  stock_service_ensure_task();
+  portENTER_CRITICAL(&s_stockMux);
+  s_updateRequested = true;
+  if (force) {
+    s_forceRequested = true;
+  }
+  portEXIT_CRITICAL(&s_stockMux);
+}
+
+bool stock_service_is_busy(void) {
+  portENTER_CRITICAL(&s_stockMux);
+  bool busy = s_updateBusy || s_updateRequested;
+  portEXIT_CRITICAL(&s_stockMux);
+  return busy;
 }

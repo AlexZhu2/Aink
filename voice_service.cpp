@@ -2,7 +2,9 @@
 
 #include "ai_model_config.h"
 #include "app_locale.h"
+#include "camera_service.h"
 #include "settings_api.h"
+#include "speaker_service.h"
 
 #include <Arduino.h>
 #include <ESP_I2S.h>
@@ -25,10 +27,16 @@
 #define VOICE_MAX_PCM_BYTES         (VOICE_SAMPLE_RATE * VOICE_SAMPLE_BYTES * VOICE_MAX_RECORD_SECONDS)
 #define VOICE_WAV_HEADER_BYTES      44U
 #define VOICE_HTTP_TIMEOUT_MS       60000
-#define VOICE_TASK_STACK_BYTES      12288
+#define VOICE_TASK_STACK_BYTES      8192
 #define VOICE_RECORD_TASK_STACK_BYTES 4096
+#define VOICE_HTTPS_MIN_INTERNAL_FREE  36000U
+#define VOICE_HTTPS_MIN_INTERNAL_BLOCK 34000U
+#define VOICE_HTTPS_RAM_WAIT_MS        45000UL
+#define VOICE_HTTPS_RAM_POLL_MS        250UL
 #define VOICE_MIMO_ASR_MODEL        "mimo-v2.5-asr"
 #define VOICE_MIMO_FALLBACK_MODEL   "mimo-v2.5"
+#define VOICE_MIMO_TTS_MODEL        "mimo-v2.5-tts"
+#define VOICE_MIMO_TTS_VOICE        "Chloe"
 #define VOICE_RECORDING_DIAGNOSTIC_ONLY 0
 #define VOICE_SERIAL_WAV_DUMP       0
 #define VOICE_CAPTURE_READ_BYTES    1024U
@@ -43,6 +51,7 @@ typedef enum {
   VOICE_PROGRESS_UPLOADING_AUDIO,
   VOICE_PROGRESS_TRANSCRIBING,
   VOICE_PROGRESS_GENERATING_RESPONSE,
+  VOICE_PROGRESS_SYNTHESIZING_SPEECH,
 } VoiceProgress;
 
 static const char *kVoiceMimoUrls[] = {
@@ -63,6 +72,7 @@ static TaskHandle_t s_recordTask = nullptr;
 static volatile bool s_recordStopRequested = false;
 static bool s_localSeedCaptureActive = false;
 static portMUX_TYPE s_voiceMux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_cameraPausedForVoice = false;
 static VoiceState s_state = VOICE_STATE_IDLE;
 static VoiceProgress s_progress = VOICE_PROGRESS_NONE;
 static bool s_dirty = false;
@@ -70,8 +80,6 @@ static char s_transcript[256];
 static char s_result[384];
 static char s_error[96];
 static unsigned long s_recordStartedMs = 0;
-static unsigned long s_speakingStartedMs = 0;
-static unsigned long s_speakingDurationMs = 0;
 
 static void voice_pipeline_task(void *param);
 static void voice_recording_task(void *param);
@@ -359,6 +367,57 @@ static void trimText(char *text) {
   text[end] = '\0';
 }
 
+static bool voiceHttpsRamReady(void) {
+  const size_t internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  const size_t internalBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  return internalBlock >= VOICE_HTTPS_MIN_INTERNAL_BLOCK &&
+         internalFree >= VOICE_HTTPS_MIN_INTERNAL_FREE;
+}
+
+static bool voiceHttpsWaitReady(const char *tag) {
+  const unsigned long startMs = millis();
+  while ((millis() - startMs) < VOICE_HTTPS_RAM_WAIT_MS) {
+    if (voiceHttpsRamReady()) {
+      return true;
+    }
+    if (tag != nullptr) {
+      Serial.printf("[Voice] %s waiting RAM: internal free=%u block=%u\r\n", tag,
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+    delay(VOICE_HTTPS_RAM_POLL_MS);
+    yield();
+  }
+  if (tag != nullptr) {
+    Serial.printf("[Voice] %s RAM timeout: internal free=%u block=%u\r\n", tag,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  }
+  return false;
+}
+
+static void voiceAcquireNetworkMemory(void) {
+  if (camera_service_lock(2000)) {
+    if (camera_service_is_ready()) {
+      camera_service_pause();
+      s_cameraPausedForVoice = true;
+      Serial.printf("[Voice] camera paused internal free=%u block=%u\r\n",
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+    camera_service_unlock();
+  }
+  delay(100);
+  (void)voiceHttpsWaitReady("https");
+}
+
+static void voiceReleaseNetworkMemory(void) {
+  if (s_cameraPausedForVoice) {
+    s_cameraPausedForVoice = false;
+    Serial.println("[Voice] camera left paused until vision/answers needs it");
+  }
+}
+
 static bool httpPostJson(const char *url, const char *apiKey, char *jsonBody, String *outResponse,
                          int *outHttpCode) {
   if (url == nullptr || apiKey == nullptr || jsonBody == nullptr || outResponse == nullptr ||
@@ -390,11 +449,16 @@ static bool httpPostJson(const char *url, const char *apiKey, char *jsonBody, St
       return false;
     }
 
-    Serial.printf("[Voice] TLS heap before connect heap=%u maxAlloc=%u internal=%u\r\n",
+    Serial.printf("[Voice] TLS heap before connect heap=%u maxAlloc=%u internal=%u block=%u\r\n",
                   (unsigned)ESP.getFreeHeap(),
                   (unsigned)ESP.getMaxAllocHeap(),
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   }
+
+  WiFi.setSleep(WIFI_PS_NONE);
+  yield();
+  delay(20);
 
   HTTPClient http;
   if (!http.begin(client, url)) {
@@ -431,6 +495,16 @@ static bool httpPostMimoJson(const char *apiKey, char *jsonBody, String *outResp
   }
   if (outHttpCode != nullptr) {
     *outHttpCode = 0;
+  }
+
+  if (!voiceHttpsWaitReady("https")) {
+    if (outHttpCode != nullptr) {
+      *outHttpCode = -1;
+    }
+    if (outResponse != nullptr) {
+      *outResponse = "internal RAM low";
+    }
+    return false;
   }
 
   String response;
@@ -502,6 +576,78 @@ static bool encodeBase64(const uint8_t *data, size_t dataLen, char **outB64, siz
   *outB64 = buffer;
   *outLen = written;
   return true;
+}
+
+static bool decodeBase64(const char *b64, size_t b64Len, uint8_t **outData, size_t *outLen) {
+  if (b64 == nullptr || outData == nullptr || outLen == nullptr || b64Len == 0) {
+    return false;
+  }
+
+  size_t needed = 0;
+  const int probe =
+      mbedtls_base64_decode(nullptr, 0, &needed, reinterpret_cast<const unsigned char *>(b64), b64Len);
+  if (probe != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL || needed == 0) {
+    Serial.printf("[Voice] b64 decode size probe failed code=%d needed=%u\r\n",
+                  probe, (unsigned)needed);
+    return false;
+  }
+
+  uint8_t *buffer =
+      static_cast<uint8_t *>(heap_caps_malloc(needed, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (buffer == nullptr) {
+    buffer = static_cast<uint8_t *>(malloc(needed));
+  }
+  if (buffer == nullptr) {
+    Serial.printf("[Voice] b64 decode alloc failed needed=%u\r\n", (unsigned)needed);
+    return false;
+  }
+
+  size_t written = 0;
+  const int decoded = mbedtls_base64_decode(buffer, needed, &written,
+                                           reinterpret_cast<const unsigned char *>(b64), b64Len);
+  if (decoded != 0 || written == 0) {
+    Serial.printf("[Voice] b64 decode failed code=%d written=%u\r\n", decoded, (unsigned)written);
+    free(buffer);
+    return false;
+  }
+
+  *outData = buffer;
+  *outLen = written;
+  return true;
+}
+
+static bool extractJsonBase64Field(const String &body, const char *containerKey, const char *fieldKey,
+                                   uint8_t **outData, size_t *outLen) {
+  if (containerKey == nullptr || fieldKey == nullptr || outData == nullptr || outLen == nullptr) {
+    return false;
+  }
+
+  char searchContainer[32];
+  snprintf(searchContainer, sizeof(searchContainer), "\"%s\"", containerKey);
+  const int containerIdx = body.indexOf(searchContainer);
+  if (containerIdx < 0) {
+    return false;
+  }
+
+  char searchField[32];
+  snprintf(searchField, sizeof(searchField), "\"%s\":\"", fieldKey);
+  const int fieldIdx = body.indexOf(searchField, containerIdx);
+  if (fieldIdx < 0) {
+    return false;
+  }
+
+  const int start = fieldIdx + (int)strlen(searchField);
+  int end = start;
+  while (end < (int)body.length() && body.charAt(end) != '"') {
+    end++;
+  }
+  if (end <= start) {
+    return false;
+  }
+
+  const String b64 = body.substring(start, end);
+  Serial.printf("[Voice] TTS b64 field len=%u\r\n", (unsigned)b64.length());
+  return decodeBase64(b64.c_str(), b64.length(), outData, outLen);
 }
 
 static void writeLe16(uint8_t *dst, uint16_t value) {
@@ -799,6 +945,8 @@ static bool stopRecordingAndStartPipeline(void) {
   s_pcm = nullptr;
   s_pcmLen = 0;
 
+  // Voice pipeline uses TLS/WiFi/mbedTLS — task stack must stay in internal RAM
+  // (PSRAM stack triggers esp_task_stack_is_sane_cache_disabled assert).
   if (xTaskCreate(voice_pipeline_task, "voice", VOICE_TASK_STACK_BYTES, nullptr, 1, &s_task) != pdPASS) {
     free(s_jobWav);
     s_jobWav = nullptr;
@@ -919,44 +1067,53 @@ static bool transcribeMimo(uint8_t *wav, size_t wavLen, char *out, size_t outLen
   char apiKey[129];
   settings_api_get_api_key(apiKey, sizeof(apiKey));
 
-  char *base64 = nullptr;
-  size_t base64Len = 0;
-  if (!encodeBase64(wav, wavLen, &base64, &base64Len)) {
-    free(wav);
-    Serial.println("[Voice] MiMo ASR b64 failed");
-    return false;
-  }
-  free(wav);
-  wav = nullptr;
-  Serial.printf("[Voice] MiMo ASR b64=%u\r\n", (unsigned)base64Len);
-
-  const size_t bodyCap = base64Len + 640;
+  const size_t b64Max = ((wavLen + 2U) / 3U) * 4U + 4U;
+  const size_t bodyCap = b64Max + 640U;
   char *body = static_cast<char *>(heap_caps_malloc(bodyCap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (body == nullptr) {
     body = static_cast<char *>(malloc(bodyCap));
   }
   if (body == nullptr) {
-    free(base64);
-    Serial.printf("[Voice] MiMo ASR body alloc failed cap=%u heap=%u psram=%u\r\n",
-                  (unsigned)bodyCap, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+    free(wav);
+    Serial.printf("[Voice] MiMo ASR body alloc failed cap=%u\r\n", (unsigned)bodyCap);
     return false;
   }
 
   size_t pos = 0;
   body[0] = '\0';
-  const bool built =
-      appendStr(body, bodyCap, &pos, "{\"model\":\"" VOICE_MIMO_ASR_MODEL "\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"data:audio/wav;base64,") &&
-      appendStr(body, bodyCap, &pos, base64) &&
-      appendStr(body, bodyCap, &pos, "\"}}]}],\"asr_options\":{\"language\":\"zh\"}}");
-  free(base64);
-  if (!built) {
-    Serial.printf("[Voice] MiMo ASR body build failed pos=%u cap=%u\r\n",
-                  (unsigned)pos, (unsigned)bodyCap);
+  if (!appendStr(body, bodyCap, &pos,
+                 "{\"model\":\"" VOICE_MIMO_ASR_MODEL "\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"data:audio/wav;base64,")) {
+    free(wav);
     free(body);
+    Serial.println("[Voice] MiMo ASR body prefix failed");
     return false;
   }
-  Serial.printf("[Voice] MiMo ASR POST body=%u heap=%u psram=%u\r\n",
-                (unsigned)strlen(body), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+
+  size_t b64Written = 0;
+  const int encoded = mbedtls_base64_encode(reinterpret_cast<unsigned char *>(body + pos),
+                                           bodyCap - pos - 64U, &b64Written, wav, wavLen);
+  free(wav);
+  wav = nullptr;
+  if (encoded != 0 || b64Written == 0) {
+    free(body);
+    Serial.printf("[Voice] MiMo ASR b64 encode failed code=%d written=%u\r\n", encoded,
+                  (unsigned)b64Written);
+    return false;
+  }
+  pos += b64Written;
+  Serial.printf("[Voice] MiMo ASR b64=%u\r\n", (unsigned)b64Written);
+
+  if (!appendStr(body, bodyCap, &pos, "\"}}]}],\"asr_options\":{\"language\":\"zh\"}}")) {
+    free(body);
+    Serial.printf("[Voice] MiMo ASR body suffix failed pos=%u cap=%u\r\n", (unsigned)pos,
+                  (unsigned)bodyCap);
+    return false;
+  }
+
+  Serial.printf("[Voice] MiMo ASR POST body=%u heap=%u psram=%u internal=%u block=%u\r\n",
+                (unsigned)strlen(body), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram(),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   Serial.flush();
   setProgress(VOICE_PROGRESS_TRANSCRIBING);
 
@@ -982,14 +1139,16 @@ static bool transcribeMimo(uint8_t *wav, size_t wavLen, char *out, size_t outLen
 static bool buildChatBody(AiProvider provider, const char *model, const char *transcript, char **outBody) {
   const char *systemText =
       app_locale_get() == APP_LANG_ZH
-          ? "你是一个小型墨水屏语音助手。用简短自然的中文回答，最多40字，不要带任何表情。"
-          : "You are a compact e-paper voice assistant. Answer naturally in at most 40 words, no emojis.";
+          ? "你是一个小型墨水屏语音助手。用简短自然的中文直接回答，最多40字。"
+            "只输出最终答案，不要思考过程，不要解释，不要带任何表情。"
+          : "You are a compact e-paper voice assistant. Answer naturally in at most 40 words. "
+            "Output only the final answer, no reasoning or explanation, no emojis.";
   const char *prefix =
       app_locale_get() == APP_LANG_ZH
           ? "用户语音转写如下，请直接回答："
           : "The user's speech transcript is below. Answer directly:";
 
-  const size_t bodyCap = strlen(model) + strlen(systemText) + strlen(prefix) + strlen(transcript) + 512;
+  const size_t bodyCap = strlen(model) + strlen(systemText) + strlen(prefix) + strlen(transcript) + 576;
   char *body = static_cast<char *>(heap_caps_malloc(bodyCap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (body == nullptr) {
     body = static_cast<char *>(malloc(bodyCap));
@@ -1004,20 +1163,155 @@ static bool buildChatBody(AiProvider provider, const char *model, const char *tr
       !appendStr(body, bodyCap, &pos, model) ||
       !appendStr(body, bodyCap, &pos,
                  provider == AI_PROVIDER_MIMO
-                     ? "\",\"max_completion_tokens\":256,\"messages\":[{\"role\":\"system\",\"content\":\""
+                     ? "\",\"max_completion_tokens\":512,\"messages\":[{\"role\":\"system\",\"content\":\""
                      : "\",\"max_tokens\":256,\"messages\":[{\"role\":\"system\",\"content\":\"") ||
       !appendJsonEscaped(body, bodyCap, &pos, systemText) ||
       !appendStr(body, bodyCap, &pos, "\"},{\"role\":\"user\",\"content\":\"") ||
       !appendJsonEscaped(body, bodyCap, &pos, prefix) ||
       !appendStr(body, bodyCap, &pos, "\\n") ||
       !appendJsonEscaped(body, bodyCap, &pos, transcript) ||
-      !appendStr(body, bodyCap, &pos, "\"}]}")) {
+      !appendStr(body, bodyCap, &pos,
+                 provider == AI_PROVIDER_MIMO
+                     ? "\"}],\"thinking\":{\"type\":\"disabled\"}}"
+                     : "\"}]}")) {
     free(body);
     return false;
   }
 
   *outBody = body;
   return true;
+}
+
+static bool voiceOutputLooksLikeReasoning(const char *text) {
+  if (text == nullptr || text[0] == '\0') {
+    return false;
+  }
+  return strstr(text, "首先") != nullptr || strstr(text, "用户的问题") != nullptr ||
+         strstr(text, "用户问") != nullptr || strstr(text, "我需要") != nullptr ||
+         strstr(text, "The user") != nullptr || strstr(text, "First,") != nullptr;
+}
+
+static bool extractVoiceDatePhrase(const char *text, char *out, size_t outLen) {
+  if (text == nullptr || out == nullptr || outLen == 0) {
+    return false;
+  }
+
+  for (const char *year = strstr(text, "年"); year != nullptr; year = strstr(year + 3, "年")) {
+    if (year < text + 4) {
+      continue;
+    }
+    const char *start = year - 4;
+    bool allDigit = true;
+    for (int i = 0; i < 4; i++) {
+      if (start[i] < '0' || start[i] > '9') {
+        allDigit = false;
+        break;
+      }
+    }
+    if (!allDigit) {
+      continue;
+    }
+
+    const char *day = strstr(year, "日");
+    size_t len = day != nullptr ? (size_t)(day - start + 1) : 16U;
+    if (len >= outLen) {
+      len = outLen - 1;
+    }
+    memcpy(out, start, len);
+    out[len] = '\0';
+    trimText(out);
+    return out[0] != '\0';
+  }
+  return false;
+}
+
+static bool extractVoiceAnswerFromReasoning(const char *reasoning, char *out, size_t outLen) {
+  if (reasoning == nullptr || reasoning[0] == '\0' || out == nullptr || outLen == 0) {
+    return false;
+  }
+
+  if (extractVoiceDatePhrase(reasoning, out, outLen)) {
+    return true;
+  }
+
+  const char *markers[] = {"最终答案", "答案是", "应该是", "通常在", "是3月", "为3月"};
+  for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); i++) {
+    const char *mark = strstr(reasoning, markers[i]);
+    if (mark == nullptr) {
+      continue;
+    }
+    mark += strlen(markers[i]);
+    while (*mark == ' ' || *mark == '：' || *mark == ':' || *mark == '\n') {
+      mark++;
+    }
+    size_t copied = 0;
+    size_t chars = 0;
+    while (mark[copied] != '\0' && mark[copied] != '\n' && chars < 40U && copied + 1 < outLen) {
+      const unsigned char c = static_cast<unsigned char>(mark[copied]);
+      size_t step = 1;
+      if (c >= 0xF0) {
+        step = 4;
+      } else if (c >= 0xE0) {
+        step = 3;
+      } else if (c >= 0xC0) {
+        step = 2;
+      }
+      if (mark[copied + step - 1] == '\0' && step > 1) {
+        break;
+      }
+      copied += step;
+      chars++;
+    }
+    if (copied == 0) {
+      continue;
+    }
+    memcpy(out, mark, copied);
+    out[copied] = '\0';
+    trimText(out);
+    if (out[0] != '\0' && !voiceOutputLooksLikeReasoning(out)) {
+      return true;
+    }
+    out[0] = '\0';
+  }
+
+  return extractVoiceDatePhrase(reasoning, out, outLen);
+}
+
+static bool parseVoiceLlmResponse(const String &body, char *out, size_t outLen) {
+  if (out == nullptr || outLen == 0) {
+    return false;
+  }
+  out[0] = '\0';
+
+  const int choicesIdx = body.indexOf("\"choices\"");
+  const String tail = choicesIdx >= 0 ? body.substring(choicesIdx) : body;
+
+  char content[384];
+  content[0] = '\0';
+  if (parseJsonStringField(tail, "content", content, sizeof(content))) {
+    trimText(content);
+    if (content[0] != '\0' && !voiceOutputLooksLikeReasoning(content)) {
+      copyText(out, outLen, content);
+      return true;
+    }
+  }
+
+  char reasoning[768];
+  reasoning[0] = '\0';
+  if (!parseJsonStringField(tail, "reasoning_content", reasoning, sizeof(reasoning))) {
+    return false;
+  }
+  trimText(reasoning);
+  if (reasoning[0] == '\0') {
+    return false;
+  }
+
+  if (extractVoiceAnswerFromReasoning(reasoning, out, outLen)) {
+    Serial.println("[Voice] LLM parse used reasoning fallback");
+    return true;
+  }
+
+  return false;
 }
 
 static bool requestChatCompletion(const char *transcript, char *out, size_t outLen) {
@@ -1047,9 +1341,7 @@ static bool requestChatCompletion(const char *transcript, char *out, size_t outL
     return false;
   }
 
-  const int choicesIdx = response.indexOf("\"choices\"");
-  const String tail = choicesIdx >= 0 ? response.substring(choicesIdx) : response;
-  if (!parseJsonStringField(tail, "content", out, outLen)) {
+  if (!parseVoiceLlmResponse(response, out, outLen)) {
     Serial.printf("[Voice] MiMo LLM parse fail %s\r\n", response.c_str());
     return false;
   }
@@ -1057,20 +1349,93 @@ static bool requestChatCompletion(const char *transcript, char *out, size_t outL
   return out[0] != '\0';
 }
 
-static unsigned long estimateSpeakingMs(const char *text) {
-  const size_t len = text != nullptr ? strlen(text) : 0;
-  unsigned long ms = (unsigned long)len * 90UL;
-  if (ms < 1500UL) {
-    ms = 1500UL;
+static bool buildTtsBody(const char *text, char **outBody) {
+  if (text == nullptr || text[0] == '\0' || outBody == nullptr) {
+    return false;
   }
-  if (ms > 12000UL) {
-    ms = 12000UL;
+
+  const char *style =
+      app_locale_get() == APP_LANG_ZH
+          ? "用自然、简洁的中文朗读，语速适中。"
+          : "Speak in a natural, friendly tone at a moderate pace.";
+
+  const size_t bodyCap = strlen(text) + strlen(style) + strlen(VOICE_MIMO_TTS_VOICE) + 384;
+  char *body = static_cast<char *>(heap_caps_malloc(bodyCap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (body == nullptr) {
+    body = static_cast<char *>(malloc(bodyCap));
   }
-  return ms;
+  if (body == nullptr) {
+    return false;
+  }
+
+  size_t pos = 0;
+  body[0] = '\0';
+  if (!appendStr(body, bodyCap, &pos, "{\"model\":\"" VOICE_MIMO_TTS_MODEL "\",\"messages\":[{\"role\":\"user\",\"content\":\"") ||
+      !appendJsonEscaped(body, bodyCap, &pos, style) ||
+      !appendStr(body, bodyCap, &pos, "\"},{\"role\":\"assistant\",\"content\":\"") ||
+      !appendJsonEscaped(body, bodyCap, &pos, text) ||
+      !appendStr(body, bodyCap, &pos, "\"}],\"audio\":{\"format\":\"wav\",\"voice\":\"" VOICE_MIMO_TTS_VOICE "\"}}")) {
+    free(body);
+    return false;
+  }
+
+  *outBody = body;
+  return true;
+}
+
+static bool synthesizeMimo(const char *text, uint8_t **outWav, size_t *outWavLen) {
+  if (text == nullptr || outWav == nullptr || outWavLen == nullptr) {
+    return false;
+  }
+  *outWav = nullptr;
+  *outWavLen = 0;
+
+  Serial.printf("[Voice] MiMo TTS prepare textLen=%u heap=%u psram=%u\r\n",
+                (unsigned)strlen(text), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+  setProgress(VOICE_PROGRESS_SYNTHESIZING_SPEECH);
+
+  char apiKey[129];
+  settings_api_get_api_key(apiKey, sizeof(apiKey));
+
+  char *body = nullptr;
+  if (!buildTtsBody(text, &body)) {
+    Serial.println("[Voice] MiMo TTS body build failed");
+    return false;
+  }
+
+  String response;
+  int httpCode = 0;
+  const bool posted = httpPostMimoJson(apiKey, body, &response, &httpCode);
+  free(body);
+
+  if (!posted) {
+    Serial.printf("[Voice] MiMo TTS HTTP %d %s\r\n", httpCode, response.c_str());
+    return false;
+  }
+
+  uint8_t *wav = nullptr;
+  size_t wavLen = 0;
+  if (!extractJsonBase64Field(response, "audio", "data", &wav, &wavLen)) {
+    Serial.printf("[Voice] MiMo TTS audio parse fail %s\r\n", response.c_str());
+    return false;
+  }
+
+  if (wavLen <= VOICE_WAV_HEADER_BYTES || memcmp(wav, "RIFF", 4) != 0) {
+    Serial.println("[Voice] MiMo TTS invalid WAV payload");
+    free(wav);
+    return false;
+  }
+
+  Serial.printf("[Voice] MiMo TTS wav=%u heap=%u psram=%u\r\n",
+                (unsigned)wavLen, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+  *outWav = wav;
+  *outWavLen = wavLen;
+  return true;
 }
 
 static void voice_pipeline_task(void *param) {
   (void)param;
+  voiceAcquireNetworkMemory();
 
   uint8_t *wav = nullptr;
   size_t wavLen = 0;
@@ -1098,6 +1463,7 @@ static void voice_pipeline_task(void *param) {
     s_task = nullptr;
     portEXIT_CRITICAL(&s_voiceMux);
     setError("MiMo speech recognition failed");
+    voiceReleaseNetworkMemory();
     vTaskDelete(nullptr);
     return;
   }
@@ -1115,20 +1481,38 @@ static void voice_pipeline_task(void *param) {
     s_task = nullptr;
     portEXIT_CRITICAL(&s_voiceMux);
     setError("LLM request failed");
+    voiceReleaseNetworkMemory();
     vTaskDelete(nullptr);
     return;
   }
 
   portENTER_CRITICAL(&s_voiceMux);
   copyText(s_result, sizeof(s_result), result);
-  s_speakingStartedMs = millis();
-  s_speakingDurationMs = estimateSpeakingMs(result);
-  s_state = VOICE_STATE_SPEAKING;
   s_dirty = true;
-  s_task = nullptr;
   portEXIT_CRITICAL(&s_voiceMux);
   Serial.printf("[Voice] result: %s\r\n", result);
-  Serial.println("[Voice] speaker playback placeholder active");
+
+  uint8_t *ttsWav = nullptr;
+  size_t ttsLen = 0;
+  const bool ttsOk = synthesizeMimo(result, &ttsWav, &ttsLen);
+
+  portENTER_CRITICAL(&s_voiceMux);
+  s_task = nullptr;
+  if (ttsOk) {
+    s_state = VOICE_STATE_SPEAKING;
+  } else {
+    s_state = VOICE_STATE_DONE;
+  }
+  s_dirty = true;
+  portEXIT_CRITICAL(&s_voiceMux);
+
+  if (ttsOk) {
+    speaker_service_play_wav_async(ttsWav, ttsLen);
+  } else {
+    speaker_service_play_notify_async();
+    Serial.println("[Voice] TTS failed, text-only fallback");
+  }
+  voiceReleaseNetworkMemory();
   vTaskDelete(nullptr);
 }
 
@@ -1169,6 +1553,7 @@ bool voice_service_interrupt_speaker(void) {
   }
   portEXIT_CRITICAL(&s_voiceMux);
   if (interrupted) {
+    speaker_service_stop();
     Serial.println("[Voice] speaker interrupted");
   }
   return interrupted;
@@ -1179,18 +1564,13 @@ bool voice_service_service(void) {
 
   VoiceState state;
   bool dirty;
-  unsigned long started;
-  unsigned long duration;
   portENTER_CRITICAL(&s_voiceMux);
   state = s_state;
   dirty = s_dirty;
-  started = s_speakingStartedMs;
-  duration = s_speakingDurationMs;
   s_dirty = false;
   portEXIT_CRITICAL(&s_voiceMux);
 
-  if (state == VOICE_STATE_SPEAKING && duration > 0 &&
-      (unsigned long)(millis() - started) >= duration) {
+  if (state == VOICE_STATE_SPEAKING && !speaker_service_is_playing()) {
     setState(VOICE_STATE_DONE);
     dirty = true;
   }
@@ -1380,6 +1760,10 @@ void voice_service_status_text(char *out, size_t outLen) {
         case VOICE_PROGRESS_GENERATING_RESPONSE:
           snprintf(out, outLen, zh ? "转录完成\n生成响应中..." :
                                      "Transcript ready\nGenerating response...");
+          break;
+        case VOICE_PROGRESS_SYNTHESIZING_SPEECH:
+          snprintf(out, outLen, zh ? "生成语音中...\n请稍等" :
+                                     "Synthesizing speech...\nPlease wait");
           break;
         case VOICE_PROGRESS_NONE:
         default:

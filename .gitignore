@@ -22,6 +22,7 @@ desktop.ini
 test.jpg
 *.jpg
 *.png
+*.bmp
 !assets/logo-circuit-ink.png
 !icon/
 !icon/*.png

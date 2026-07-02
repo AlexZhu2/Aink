@@ -13,6 +13,9 @@ void ui_vision_leave(void);
 void ui_vision_refresh(void);
 bool ui_vision_is_active(void);
 
+bool ui_vision_is_result_view(void);
+void ui_vision_restart_preview(void);
+
 bool ui_vision_request_capture(void);
 bool ui_vision_consume_capture_request(void);
 void ui_vision_set_busy(void);

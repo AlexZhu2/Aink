@@ -143,6 +143,9 @@ static BtnAction actionFor(BtnId id, uint8_t clickCount, bool isLong) {
     if (id == BTN_ID_A) {
       return BTN_ACTION_BACK;
     }
+    if (id == BTN_ID_B) {
+      return BTN_ACTION_NONE;
+    }
     return BTN_ACTION_NONE;
   }
 
@@ -292,9 +295,6 @@ static BtnAction action_from_serial_char(char ch) {
 #endif
 
 void btn_input_init(void) {
-  detachInterrupt(digitalPinToInterrupt(BTN_A_PIN));
-  detachInterrupt(digitalPinToInterrupt(BTN_B_PIN));
-
   pinMode(BTN_A_PIN, INPUT_PULLUP);
   pinMode(BTN_B_PIN, INPUT_PULLUP);
 #if KEY_INDICATOR_LED_PIN >= 0
