@@ -23,6 +23,8 @@
 #define WEATHER_HTTP_OPTIONAL_MS   20000
 #define WEATHER_TASK_POLL_MS       250
 #define WEATHER_TASK_STACK_BYTES   8192
+#define WEATHER_HTTPS_MIN_INTERNAL_FREE  40000U
+#define WEATHER_HTTPS_MIN_INTERNAL_BLOCK 28000U
 
 static WeatherSnapshot s_snapshot = {};
 static unsigned long s_lastFetchMs = 0;
@@ -40,6 +42,7 @@ static int roundTemp(float tempC) {
 
 static bool httpsGetBody(const char *url, const char *tag, const char *apiKey, String *outBody,
                          uint32_t timeoutMs);
+static bool weatherHttpsRamReady(const char *tag);
 static bool qweatherGet(const char *host, const char *pathQuery, const char *apiKey, const char *tag,
                         String *outBody, uint32_t timeoutMs);
 static const char *qweatherLangCode(void);
@@ -288,9 +291,26 @@ static bool parseJsonFloatAfterKey(const String &body, int sectionIdx, const cha
   return true;
 }
 
+static bool weatherHttpsRamReady(const char *tag) {
+  const size_t internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  const size_t internalBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  if (internalBlock >= WEATHER_HTTPS_MIN_INTERNAL_BLOCK &&
+      internalFree >= WEATHER_HTTPS_MIN_INTERNAL_FREE) {
+    return true;
+  }
+  if (tag != nullptr) {
+    Serial.printf("[Weather] %s deferred: internal free=%u block=%u\r\n", tag,
+                  (unsigned)internalFree, (unsigned)internalBlock);
+  }
+  return false;
+}
+
 static bool httpsGetBody(const char *url, const char *tag, const char *apiKey, String *outBody,
                          uint32_t timeoutMs) {
   if (url == nullptr || tag == nullptr || outBody == nullptr) {
+    return false;
+  }
+  if (!weatherHttpsRamReady(tag)) {
     return false;
   }
   if (timeoutMs == 0) {
@@ -312,14 +332,16 @@ static bool httpsGetBody(const char *url, const char *tag, const char *apiKey, S
     }
   }
 
-  Serial.printf("[Weather] %s GET heap=%u block=%u dns=%s\r\n", tag,
-                (unsigned)ESP.getFreeHeap(),
-                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+  const size_t internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  const size_t internalBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  Serial.printf("[Weather] %s GET internal free=%u block=%u dns=%s\r\n", tag,
+                (unsigned)internalFree, (unsigned)internalBlock,
                 dnsOk ? serverIp.toString().c_str() : "fail");
   Serial.flush();
 
   WiFi.setSleep(WIFI_PS_NONE);
   yield();
+  delay(20);
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -453,55 +475,65 @@ static bool qweatherResponseOk(const String &body) {
 }
 
 static bool fetchGeoLocation(float *outLat, float *outLon, char *outLocation, size_t locationLen) {
-  HTTPClient http;
-  http.setTimeout(10000);
-  if (!http.begin("http://ip-api.com/json/?fields=status,lat,lon,city,countryCode")) {
-    return false;
-  }
-
-  const int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    Serial.printf("[Weather] geo HTTP %d\n", code);
-    http.end();
-    return false;
-  }
-
-  const String body = http.getString();
-  http.end();
-
-  if (body.indexOf("\"status\":\"success\"") < 0) {
-    Serial.println("[Weather] geo status failed");
-    return false;
-  }
-
-  const int latIdx = body.indexOf("\"lat\":");
-  const int lonIdx = body.indexOf("\"lon\":");
-  if (latIdx < 0 || lonIdx < 0) {
-    return false;
-  }
-
-  *outLat = body.substring(latIdx + 6).toFloat();
-  *outLon = body.substring(lonIdx + 6).toFloat();
-
-  char city[20] = {};
-  char countryCode[4] = {};
-  parseJsonQuotedString(body, "city", city, sizeof(city));
-  parseJsonQuotedString(body, "countryCode", countryCode, sizeof(countryCode));
-
-  if (outLocation != nullptr && locationLen > 0) {
-    if (city[0] != '\0' && countryCode[0] != '\0') {
-      snprintf(outLocation, locationLen, "%s, %s", city, countryCode);
-    } else if (city[0] != '\0') {
-      snprintf(outLocation, locationLen, "%s", city);
-    } else {
-      outLocation[0] = '\0';
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      delay(400);
+      yield();
     }
+
+    HTTPClient http;
+    http.setConnectTimeout(8000);
+    http.setTimeout(10000);
+    if (!http.begin("http://ip-api.com/json/?fields=status,lat,lon,city,countryCode")) {
+      continue;
+    }
+
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+      Serial.printf("[Weather] geo HTTP %d (%s)\n", code, http.errorToString(code).c_str());
+      http.end();
+      continue;
+    }
+
+    const String body = http.getString();
+    http.end();
+
+    if (body.indexOf("\"status\":\"success\"") < 0) {
+      Serial.println("[Weather] geo status failed");
+      continue;
+    }
+
+    const int latIdx = body.indexOf("\"lat\":");
+    const int lonIdx = body.indexOf("\"lon\":");
+    if (latIdx < 0 || lonIdx < 0) {
+      continue;
+    }
+
+    *outLat = body.substring(latIdx + 6).toFloat();
+    *outLon = body.substring(lonIdx + 6).toFloat();
+
+    char city[20] = {};
+    char countryCode[4] = {};
+    parseJsonQuotedString(body, "city", city, sizeof(city));
+    parseJsonQuotedString(body, "countryCode", countryCode, sizeof(countryCode));
+
+    if (outLocation != nullptr && locationLen > 0) {
+      if (city[0] != '\0' && countryCode[0] != '\0') {
+        snprintf(outLocation, locationLen, "%s, %s", city, countryCode);
+      } else if (city[0] != '\0') {
+        snprintf(outLocation, locationLen, "%s", city);
+      } else {
+        outLocation[0] = '\0';
+      }
+    }
+
+    Serial.printf("[Weather] geo lat=%.4f lon=%.4f loc=%s\n",
+                  *outLat, *outLon,
+                  (outLocation != nullptr && outLocation[0] != '\0') ? outLocation : "?");
+    return true;
   }
 
-  Serial.printf("[Weather] geo lat=%.4f lon=%.4f loc=%s\n",
-                *outLat, *outLon,
-                (outLocation != nullptr && outLocation[0] != '\0') ? outLocation : "?");
-  return true;
+  return false;
 }
 
 static bool parseJsonIntAfterKey(const String &body, int sectionIdx, const char *fieldKey, int *outVal) {
@@ -1061,14 +1093,19 @@ void weather_service_update(bool force) {
       (!force && snapshotValid && (now - lastFetchMs) < WEATHER_FETCH_INTERVAL_MS) ||
       (!force && !snapshotValid && lastAttemptMs != 0 &&
        (now - lastAttemptMs) < WEATHER_RETRY_INTERVAL_MS);
-  if (!skip) {
-    s_lastAttemptMs = now;
-  }
   portEXIT_CRITICAL(&s_weatherMux);
 
   if (skip) {
     return;
   }
+
+  if (!weatherHttpsRamReady("fetch")) {
+    return;
+  }
+
+  portENTER_CRITICAL(&s_weatherMux);
+  s_lastAttemptMs = now;
+  portEXIT_CRITICAL(&s_weatherMux);
 
   WeatherSnapshot fresh = {};
   if (fetchWeather(&fresh)) {

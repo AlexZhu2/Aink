@@ -307,6 +307,8 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
 
   if (ui_clock_is_active()) {
     switch (action) {
+      case BTN_ACTION_NEXT:
+        return ui_clock_handle_btn(action, outRefreshMode);
       case BTN_ACTION_BACK:
         go_home(outRefreshMode);
         return true;

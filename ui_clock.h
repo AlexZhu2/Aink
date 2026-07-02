@@ -1,6 +1,8 @@
 #ifndef UI_CLOCK_H
 #define UI_CLOCK_H
 
+#include "btn_input.h"
+#include "ui_refresh.h"
 #include <lvgl.h>
 #include <time.h>
 
@@ -11,6 +13,7 @@ void ui_clock_refresh_if_minute(const struct tm *timeinfo);
 void ui_clock_on_settings_changed(void);
 void ui_clock_refresh_locale(void);
 bool ui_clock_is_active(void);
+bool ui_clock_handle_btn(BtnAction action, UiRefreshMode *outRefreshMode);
 
 lv_obj_t *ui_clock_get_screen(void);
 

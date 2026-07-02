@@ -3,6 +3,7 @@
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <time.h>
 #include "EPD_1in54_V2.h"
 #include "weather_icons.h"
@@ -27,6 +28,7 @@
 #include "ui_refresh.h"
 #include "settings_api.h"
 #include "app_locale.h"
+#include "worker_calendar_sync.h"
 #include "voice_service.h"
 #include "speaker_service.h"
 
@@ -110,6 +112,9 @@ static unsigned long lastUserInputMs = 0;
 static unsigned long wifiConnectStartMs = 0;
 static unsigned long nextWifiAttemptMs = 0;
 static unsigned long ntpSyncStartMs = 0;
+static unsigned long lastSerialHeartbeatMs = 0;
+
+#define SERIAL_HEARTBEAT_MS 30000UL
 
 static void serviceNetworkStateMachine(bool allowBlockingWork);
 static void serviceStockNameRetry(bool wifiConnected, bool inputIdle);
@@ -438,6 +443,15 @@ static void serviceNetworkStateMachine(bool allowBlockingWork) {
 
   if (stock_service_consume_fresh_fetch()) {
     requestDisplayRefresh(UI_REFRESH_QUALITY);
+  }
+
+  if (allowBlockingWork && !weather_service_is_busy() && !stock_service_is_busy()) {
+    if (worker_calendar_sync_service(true)) {
+      if (ui_clock_is_active()) {
+        ui_clock_refresh();
+      }
+      requestDisplayRefresh(UI_REFRESH_QUALITY);
+    }
   }
 }
 
@@ -1090,6 +1104,7 @@ static bool serviceDisplayBootState(void) {
     EPD_1IN54_V2_Enter_Partial();
     epaper_mark_partial_ready();
     displayBootState = DISPLAY_BOOT_READY;
+    lastUserInputMs = millis();
     Serial.println("[EPD] partial ready after async boot splash");
     return true;
   }
@@ -1097,16 +1112,7 @@ static bool serviceDisplayBootState(void) {
   return false;
 }
 
-static void startNormalOperation() {
-  portalModeActive = false;
-  epaper_set_portal_mirror(false);
-
-  Serial.println("[EPD] boot splash (~25s, async)...");
-  EPD_1IN54_V2_Init();
-  (void)boot_splash_draw_to_epaper();
-  epaper_display_base_image_async();
-  displayBootState = DISPLAY_BOOT_SPLASH_WAIT;
-
+static void resetNetworkAndServiceState(void) {
   lastDisplayedMinute = -1;
   lastWifiState = -1;
   lastWeatherIcon = -1;
@@ -1116,13 +1122,14 @@ static void startNormalOperation() {
   networkWeatherForcePending = false;
   networkWeatherServicePending = false;
   networkStockForcePending = false;
-  lastUserInputMs = 0;
   wifiConnectStartMs = 0;
   nextWifiAttemptMs = 0;
   ntpSyncStartMs = 0;
   weather_service_reset();
   stock_service_reset();
+}
 
+static void initApplicationUi(void) {
   btn_input_init();
   ui_lvgl_init();
   app_locale_init();
@@ -1139,9 +1146,29 @@ static void startNormalOperation() {
   ui_settings_init();
   ui_nav_init();
   ui_lvgl_prepare();
+  worker_calendar_init();
+}
+
+static void startNormalOperation() {
+  portalModeActive = false;
+  epaper_set_portal_mirror(false);
+
+  Serial.println("[EPD] boot splash (~25s, async)...");
+  EPD_1IN54_V2_Init();
+  (void)boot_splash_draw_to_epaper();
+  epaper_display_base_image_async();
+  displayBootState = DISPLAY_BOOT_SPLASH_WAIT;
+
+  resetNetworkAndServiceState();
+  lastUserInputMs = 0;
+
+  initApplicationUi();
 
   speaker_service_init();
   speaker_service_play_boot_chime_async();
+
+  Serial.println("[Boot] normal operation ready");
+  Serial.flush();
 
   requestDisplayRefresh(UI_REFRESH_NAV);
 }
@@ -1367,8 +1394,15 @@ static void serviceDisplayRefresh(bool force) {
 
 void setup() {
   Serial.begin(115200);
-  delay(500);
-  Serial.println("\n=== Aink ===");
+  const unsigned long usbWaitStart = millis();
+  while (!Serial && (millis() - usbWaitStart) < 3000UL) {
+    delay(10);
+  }
+  delay(200);
+  Serial.println();
+  Serial.printf("\n=== Aink === reset=%d uptime=%lums\n",
+                (int)esp_reset_reason(), millis());
+  Serial.flush();
   if (psramFound()) {
     heap_caps_malloc_extmem_enable(4096);
     Serial.printf("[Heap] PSRAM enabled, malloc>=4096 to extmem heap=%u psram=%u block=%u\n",
@@ -1391,6 +1425,7 @@ void setup() {
     Serial.println("[WiFi] No stored credentials; entering config portal");
     enterPortalMode();
   }
+  Serial.flush();
 }
 
 void loop() {
@@ -1475,12 +1510,8 @@ void loop() {
   const bool voiceBusy = voice_service_is_busy();
   const VoiceState voiceState = voice_service_state();
   const bool answersBusy = ui_answers_is_busy();
-  const bool voiceScreenActive = ui_voice_is_active();
   const bool voiceCanRefresh =
-      voiceState == VOICE_STATE_RECORDING ||
-      (voiceScreenActive &&
-       (voiceState == VOICE_STATE_THINKING ||
-        voiceState == VOICE_STATE_SPEAKING));
+      voiceState == VOICE_STATE_RECORDING || voiceState == VOICE_STATE_SPEAKING;
   if (!voiceBusy || voiceCanRefresh || answersBusy) {
     serviceDisplayRefresh(false);
   }
@@ -1489,16 +1520,27 @@ void loop() {
   const bool visionIdle = !ui_vision_is_busy();
   const bool answersIdle = !answersBusy;
   const bool voiceIdle = !voiceBusy;
-  const bool displayAllowsBackgroundWork =
-      displayBootState == DISPLAY_BOOT_READY ||
-      displayBootState == DISPLAY_BOOT_SPLASH_WAIT;
-  serviceNetworkStateMachine(displayAllowsBackgroundWork &&
+  const bool speakerIdle = !speaker_service_is_playing();
+  const bool networkWorkAllowed = displayBootState == DISPLAY_BOOT_READY;
+  serviceNetworkStateMachine(networkWorkAllowed &&
                              !displayRefreshPending &&
                              !epaper_upload_active() &&
                              inputIdle &&
                              visionIdle &&
                              answersIdle &&
-                             voiceIdle);
-  serviceStockNameRetry(wifiConnected, inputIdle && visionIdle && answersIdle && voiceIdle);
+                             voiceIdle &&
+                             speakerIdle);
+  serviceStockNameRetry(wifiConnected, inputIdle && visionIdle && answersIdle && voiceIdle && speakerIdle);
+
+  const unsigned long nowMs = millis();
+  if (displayBootState == DISPLAY_BOOT_READY &&
+      (lastSerialHeartbeatMs == 0 || (nowMs - lastSerialHeartbeatMs) >= SERIAL_HEARTBEAT_MS)) {
+    lastSerialHeartbeatMs = nowMs;
+    Serial.printf("[Alive] uptime=%lus heap=%u internal=%u\r\n",
+                  nowMs / 1000UL,
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  }
+
   delay(50);
 }

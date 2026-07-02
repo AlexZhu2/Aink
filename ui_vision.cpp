@@ -488,7 +488,12 @@ void ui_vision_init(void) {
   lv_obj_add_flag(s_resultLabel, LV_OBJ_FLAG_HIDDEN);
 
   ensure_preview_task();
-  show_preview_view();
+  s_view = VISION_VIEW_PREVIEW;
+  s_busy = false;
+  lv_obj_clear_flag(s_previewFrame, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(s_busyLabel, LV_OBJ_FLAG_HIDDEN);
+  set_preview_state(false, false);
+  clear_preview_canvas();
 }
 
 void ui_vision_show(void) {

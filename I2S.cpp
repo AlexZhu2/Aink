@@ -6,22 +6,39 @@
 
 static I2SClass s_speaker;
 static bool s_i2sReady = false;
+static uint32_t s_sampleRate = SAMPLE_RATE;
 
-void I2S_Init(void) {
-  if (s_i2sReady) {
+void I2S_InitAtRate(uint32_t sampleRate) {
+  if (sampleRate == 0) {
+    sampleRate = SAMPLE_RATE;
+  }
+  if (s_i2sReady && s_sampleRate == sampleRate) {
     return;
+  }
+  if (s_i2sReady) {
+    s_speaker.end();
+    s_i2sReady = false;
   }
 
   s_speaker.setPins(PIN_I2S_BCLK, PIN_I2S_LRC, PIN_I2S_DOUT);
   s_speaker.setTimeout(1000);
-  if (!s_speaker.begin(I2S_MODE_STD, SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO)) {
-    Serial.println("[I2S] speaker init failed");
+  if (!s_speaker.begin(I2S_MODE_STD, sampleRate, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO)) {
+    Serial.printf("[I2S] speaker init failed @ %u Hz\r\n", (unsigned)sampleRate);
     return;
   }
 
+  s_sampleRate = sampleRate;
   s_i2sReady = true;
-  Serial.printf("[I2S] speaker ready BCLK=%d LRC=%d DOUT=%d @ %d Hz\r\n",
-                PIN_I2S_BCLK, PIN_I2S_LRC, PIN_I2S_DOUT, SAMPLE_RATE);
+  Serial.printf("[I2S] speaker ready BCLK=%d LRC=%d DOUT=%d @ %u Hz\r\n",
+                PIN_I2S_BCLK, PIN_I2S_LRC, PIN_I2S_DOUT, (unsigned)s_sampleRate);
+}
+
+void I2S_Init(void) {
+  I2S_InitAtRate(SAMPLE_RATE);
+}
+
+uint32_t I2S_GetSampleRate(void) {
+  return s_sampleRate;
 }
 
 void I2S_Shutdown(void) {
