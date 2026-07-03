@@ -24,6 +24,8 @@
 #include "ui_voice.h"
 #include "ui_clock.h"
 #include "ui_life.h"
+#include "ui_rss.h"
+#include "rss_service.h"
 #include "ui_status_bar.h"
 #include "ui_refresh.h"
 #include "settings_api.h"
@@ -785,6 +787,9 @@ static void handlePortalRoot() {
     button { margin-top: 18px; width: 100%; padding: 12px; font-size: 16px; border: 0; border-radius: 8px; background: #111; color: #fff; }
     .hint { margin-top: 16px; font-size: 13px; color: #666; line-height: 1.5; }
     .badge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; color: #0a6; background: #e8f8ef; border-radius: 999px; vertical-align: middle; }
+    .feed-list { display: grid; gap: 8px; margin-top: 8px; }
+    .feed-item { display: flex; align-items: center; gap: 8px; font-size: 15px; color: #222; }
+    .feed-item input { width: auto; margin: 0; }
     a { color: #06c; }
   </style>
 </head>
@@ -1143,6 +1148,8 @@ static void initApplicationUi(void) {
   ui_voice_init();
   ui_clock_init();
   ui_life_init();
+  rss_service_init();
+  ui_rss_init();
   ui_settings_init();
   ui_nav_init();
   ui_lvgl_prepare();
@@ -1230,6 +1237,8 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
       }
     } else if (ui_nav_is_clock()) {
       ui_clock_refresh();
+    } else if (ui_nav_is_rss()) {
+      ui_rss_refresh();
     } else if (ui_nav_is_answers()) {
       ui_answers_refresh();
     } else if (ui_nav_is_home()) {
@@ -1481,6 +1490,11 @@ void loop() {
     requestDisplayRefresh(stockMode);
   }
 
+  UiRefreshMode rssMode = UI_REFRESH_NONE;
+  if (ui_rss_service(&rssMode)) {
+    requestDisplayRefresh(rssMode);
+  }
+
   const bool wifiConnected = isWifiConnected();
   const int wifiState = wifiConnected ? 1 : 0;
   WeatherSnapshot weatherSnap = {};
@@ -1522,14 +1536,22 @@ void loop() {
   const bool voiceIdle = !voiceBusy;
   const bool speakerIdle = !speaker_service_is_playing();
   const bool networkWorkAllowed = displayBootState == DISPLAY_BOOT_READY;
-  serviceNetworkStateMachine(networkWorkAllowed &&
-                             !displayRefreshPending &&
-                             !epaper_upload_active() &&
-                             inputIdle &&
-                             visionIdle &&
-                             answersIdle &&
-                             voiceIdle &&
-                             speakerIdle);
+  const bool allowBlockingWork = networkWorkAllowed &&
+                                 !displayRefreshPending &&
+                                 !epaper_upload_active() &&
+                                 inputIdle &&
+                                 visionIdle &&
+                                 answersIdle &&
+                                 voiceIdle &&
+                                 speakerIdle;
+  serviceNetworkStateMachine(allowBlockingWork);
+  if (networkWorkAllowed && wifiConnected && !epaper_upload_active()) {
+    const bool rssPollAllowed =
+        ui_nav_is_rss() || (!weather_service_is_busy() && !stock_service_is_busy());
+    if (rssPollAllowed) {
+      rss_service_poll(true);
+    }
+  }
   serviceStockNameRetry(wifiConnected, inputIdle && visionIdle && answersIdle && voiceIdle && speakerIdle);
 
   const unsigned long nowMs = millis();

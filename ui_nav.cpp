@@ -10,6 +10,7 @@
 #include "ui_weather.h"
 #include "ui_clock.h"
 #include "ui_life.h"
+#include "ui_rss.h"
 #include "voice_service.h"
 
 #include <Arduino.h>
@@ -52,6 +53,10 @@ bool ui_nav_is_clock(void) {
 
 bool ui_nav_is_life(void) {
   return !s_onHome && ui_life_is_active();
+}
+
+bool ui_nav_is_rss(void) {
+  return !s_onHome && ui_rss_is_active();
 }
 
 bool ui_nav_hides_status_bar(void) {
@@ -108,6 +113,8 @@ static void open_focused_tile(void) {
   } else if (focus == 5) {
     ui_life_show();
   } else if (focus == 6) {
+    ui_rss_show();
+  } else if (focus == 7) {
     ui_settings_show();
   } else {
     ui_detail_show(ui_home_focus_title(), app_tr(TR_COMING_SOON));
@@ -336,6 +343,21 @@ bool ui_nav_handle(BtnAction action, UiRefreshMode *outRefreshMode) {
 
   if (ui_stock_is_active()) {
     if (ui_stock_nav_handle(action, outRefreshMode)) {
+      return true;
+    }
+    switch (action) {
+      case BTN_ACTION_BACK:
+        go_home(outRefreshMode);
+        return true;
+      case BTN_ACTION_VOICE_TOGGLE:
+        return open_voice_interaction(outRefreshMode);
+      default:
+        return false;
+    }
+  }
+
+  if (ui_rss_is_active()) {
+    if (ui_rss_handle_btn(action, outRefreshMode)) {
       return true;
     }
     switch (action) {
