@@ -26,6 +26,7 @@ extern "C" {
 #define RSS_QR_MAX_URL_BYTES   154
 #define RSS_HINT_Y            186
 #define RSS_QR_BUFFER_SIZE    350
+#define RSS_AUTO_ADVANCE_MS   30000UL
 
 static_assert(RSS_LINK_LEN - 1 <= RSS_QR_MAX_URL_BYTES,
               "RSS link buffer exceeds QR version 7-L byte capacity");
@@ -39,6 +40,16 @@ static lv_obj_t *s_qrCaptionLabel = nullptr;
 static lv_obj_t *s_hintLabel = nullptr;
 static lv_color_t *s_qrCanvasBuf = nullptr;
 static int s_currentIndex = 0;
+static unsigned long s_lastAutoAdvanceMs = 0;
+static RssFeedSnapshot s_snap;
+
+static void reset_auto_advance_timer(void) {
+  s_lastAutoAdvanceMs = millis();
+}
+
+static void reload_snap(void) {
+  rss_service_get_snapshot(&s_snap);
+}
 
 static void style_label(lv_obj_t *label) {
   lv_obj_set_style_text_color(label, lv_color_black(), LV_PART_MAIN);
@@ -125,12 +136,11 @@ static bool qr_canvas_encode_url(const char *url) {
 }
 
 static void render_current(void) {
-  RssFeedSnapshot snap = {};
-  rss_service_get_snapshot(&snap);
+  reload_snap();
 
   lv_label_set_text(s_sourceLabel, app_tr(TR_RSS_SOURCE));
 
-  if (rss_service_is_busy() && (!snap.valid || snap.count <= 0)) {
+  if (rss_service_is_busy() && (!s_snap.valid || s_snap.count <= 0)) {
     lv_label_set_text(s_indexLabel, "");
     lv_label_set_text(s_bodyLabel, app_tr(TR_RSS_LOADING));
     if (s_qrCanvas != nullptr) {
@@ -142,7 +152,7 @@ static void render_current(void) {
     return;
   }
 
-  if (!snap.valid || snap.count <= 0) {
+  if (!s_snap.valid || s_snap.count <= 0) {
     lv_label_set_text(s_indexLabel, "");
     lv_label_set_text(s_bodyLabel, app_tr(TR_RSS_NO_DATA));
     if (s_qrCanvas != nullptr) {
@@ -154,23 +164,23 @@ static void render_current(void) {
     return;
   }
 
-  if (s_currentIndex >= snap.count) {
+  if (s_currentIndex >= s_snap.count) {
     s_currentIndex = 0;
   }
   if (s_currentIndex < 0) {
-    s_currentIndex = snap.count - 1;
+    s_currentIndex = s_snap.count - 1;
   }
 
   char indexLine[16];
-  snprintf(indexLine, sizeof(indexLine), "%d/%d", s_currentIndex + 1, snap.count);
+  snprintf(indexLine, sizeof(indexLine), "%d/%d", s_currentIndex + 1, s_snap.count);
   lv_label_set_text(s_indexLabel, indexLine);
-  lv_label_set_text(s_bodyLabel, snap.items[s_currentIndex].title);
+  lv_label_set_text(s_bodyLabel, s_snap.items[s_currentIndex].title);
 
   if (s_qrCanvas == nullptr) {
     return;
   }
 
-  const bool hasQr = qr_canvas_encode_url(snap.items[s_currentIndex].link);
+  const bool hasQr = qr_canvas_encode_url(s_snap.items[s_currentIndex].link);
   lv_obj_invalidate(s_qrCanvas);
   if (hasQr) {
     lv_obj_clear_flag(s_qrCanvas, LV_OBJ_FLAG_HIDDEN);
@@ -179,6 +189,20 @@ static void render_current(void) {
     lv_obj_add_flag(s_qrCanvas, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_qrCaptionLabel, LV_OBJ_FLAG_HIDDEN);
   }
+}
+
+static bool advance_to_next(UiRefreshMode *outRefreshMode) {
+  reload_snap();
+  if (!s_snap.valid || s_snap.count <= 0) {
+    return false;
+  }
+  s_currentIndex++;
+  reset_auto_advance_timer();
+  render_current();
+  if (outRefreshMode != nullptr) {
+    *outRefreshMode = UI_REFRESH_FAST;
+  }
+  return true;
 }
 
 void ui_rss_init(void) {
@@ -237,14 +261,14 @@ void ui_rss_init(void) {
 
 void ui_rss_show(void) {
   s_currentIndex = 0;
-  RssFeedSnapshot snap = {};
-  rss_service_get_snapshot(&snap);
-  if (!snap.valid || snap.count <= 0 || rss_service_is_stale()) {
+  reload_snap();
+  if (!s_snap.valid || s_snap.count <= 0 || rss_service_is_stale()) {
     rss_service_request_fetch(false);
   }
   render_current();
   lv_scr_load(s_screenRss);
   lv_obj_invalidate(s_screenRss);
+  reset_auto_advance_timer();
 }
 
 void ui_rss_refresh(void) {
@@ -271,18 +295,14 @@ bool ui_rss_is_active(void) {
 
 bool ui_rss_handle_btn(BtnAction action, UiRefreshMode *outRefreshMode) {
   if (action == BTN_ACTION_NEXT) {
-    s_currentIndex++;
-    render_current();
-    if (outRefreshMode != nullptr) {
-      *outRefreshMode = UI_REFRESH_FAST;
-    }
-    return true;
+    return advance_to_next(outRefreshMode);
   }
   if (action == BTN_ACTION_PREV) {
     if (rss_service_is_busy()) {
       return true;
     }
     rss_service_request_fetch(true);
+    reset_auto_advance_timer();
     render_current();
     if (outRefreshMode != nullptr) {
       *outRefreshMode = UI_REFRESH_FAST;
@@ -304,6 +324,7 @@ bool ui_rss_service(UiRefreshMode *outRefreshMode) {
     ui_home_refresh_rss();
     if (ui_rss_is_active()) {
       ui_rss_refresh();
+      reset_auto_advance_timer();
       if (outRefreshMode != nullptr) {
         *outRefreshMode = UI_REFRESH_FAST;
       }
@@ -327,10 +348,20 @@ bool ui_rss_service(UiRefreshMode *outRefreshMode) {
   if (s_wasBusy) {
     s_wasBusy = false;
     ui_rss_refresh();
+    reset_auto_advance_timer();
     if (outRefreshMode != nullptr) {
       *outRefreshMode = UI_REFRESH_FAST;
     }
     return true;
+  }
+
+  reload_snap();
+  if (s_snap.valid && s_snap.count > 1) {
+    const unsigned long nowMs = millis();
+    if (s_lastAutoAdvanceMs == 0 ||
+        (nowMs - s_lastAutoAdvanceMs) >= RSS_AUTO_ADVANCE_MS) {
+      return advance_to_next(outRefreshMode);
+    }
   }
 
   return false;
