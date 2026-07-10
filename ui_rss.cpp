@@ -1,14 +1,12 @@
 #include "ui_rss.h"
 
 #include "app_locale.h"
-#include "epaper_canvas.h"
 #include "rss_service.h"
 #include "ui_home.h"
 #include "ui_fonts.h"
 #include "ui_lvgl.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <stdio.h>
 #include <string.h>
@@ -24,8 +22,13 @@ extern "C" {
 #define RSS_QR_PX              56
 #define RSS_QR_X              136
 #define RSS_QR_Y               26
+#define RSS_QR_VERSION           7
+#define RSS_QR_MAX_URL_BYTES   154
 #define RSS_HINT_Y            186
 #define RSS_QR_BUFFER_SIZE    350
+
+static_assert(RSS_LINK_LEN - 1 <= RSS_QR_MAX_URL_BYTES,
+              "RSS link buffer exceeds QR version 7-L byte capacity");
 
 static lv_obj_t *s_screenRss = nullptr;
 static lv_obj_t *s_sourceLabel = nullptr;
@@ -84,15 +87,10 @@ static bool qr_canvas_encode_url(const char *url) {
 
   static uint8_t qrBuffer[RSS_QR_BUFFER_SIZE];
   QRCode qrcode;
-  bool ok = false;
-
-  for (uint8_t version = 2; version <= 7; version++) {
-    if (qrcode_initText(&qrcode, qrBuffer, version, ECC_LOW, url) == 0) {
-      ok = true;
-      break;
-    }
-  }
-  if (!ok) {
+  const size_t urlLen = strlen(url);
+  if (urlLen > RSS_QR_MAX_URL_BYTES ||
+      qrcode_getBufferSize(RSS_QR_VERSION) > sizeof(qrBuffer) ||
+      qrcode_initText(&qrcode, qrBuffer, RSS_QR_VERSION, ECC_LOW, url) != 0) {
     Serial.println("[RSS] QR encode failed");
     qr_canvas_clear();
     return false;
@@ -297,11 +295,6 @@ bool ui_rss_handle_btn(BtnAction action, UiRefreshMode *outRefreshMode) {
 bool ui_rss_service(UiRefreshMode *outRefreshMode) {
   if (outRefreshMode != nullptr) {
     *outRefreshMode = UI_REFRESH_NONE;
-  }
-
-  if (ui_rss_is_active() && rss_service_is_busy() && WiFi.status() == WL_CONNECTED &&
-      !epaper_upload_active()) {
-    rss_service_poll(true);
   }
 
   static bool s_wasBusy = false;
