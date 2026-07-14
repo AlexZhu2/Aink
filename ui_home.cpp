@@ -150,18 +150,46 @@ static void bind_life_slot(int slot) {
   lv_label_set_text(s_subLabels[slot], app_tr(TR_LIFE_HINT));
 }
 
+static size_t utf8_prefix_bytes(const char *text, size_t maxBytes) {
+  size_t used = 0;
+  while (text != nullptr && used < maxBytes && text[used] != '\0') {
+    const unsigned char lead = (unsigned char)text[used];
+    size_t charLen = 0;
+    if (lead < 0x80) {
+      charLen = 1;
+    } else if ((lead & 0xE0) == 0xC0) {
+      charLen = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+      charLen = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+      charLen = 4;
+    } else {
+      break;
+    }
+
+    if (used + charLen > maxBytes) {
+      break;
+    }
+    for (size_t i = 1; i < charLen; i++) {
+      if (text[used + i] == '\0' ||
+          ((unsigned char)text[used + i] & 0xC0) != 0x80) {
+        return used;
+      }
+    }
+    used += charLen;
+  }
+  return used;
+}
+
 static void bind_rss_slot(int slot) {
   canvas_set_bitmap_icon(s_iconCanvas[slot], news_tile_bitmap);
 
-  const char *preview = rss_service_tile_preview();
+  char preview[RSS_TITLE_LEN] = {};
   char line[20];
-  if (preview == nullptr || preview[0] == '\0' || strcmp(preview, "--") == 0) {
+  if (!rss_service_get_tile_preview(preview, sizeof(preview)) || preview[0] == '\0') {
     snprintf(line, sizeof(line), "--");
   } else {
-    size_t len = strlen(preview);
-    if (len > 10) {
-      len = 10;
-    }
+    const size_t len = utf8_prefix_bytes(preview, 10);
     memcpy(line, preview, len);
     line[len] = '\0';
     if (preview[len] != '\0') {

@@ -11,6 +11,7 @@
 
 #define RSS_FEED_URL "https://sspai.com/feed"
 #define RSS_HTTP_TIMEOUT_MS 15000UL
+#define RSS_RETRY_INTERVAL_MS (5UL * 60UL * 1000)
 #define RSS_HTTPS_MIN_INTERNAL_FREE  32000U
 #define RSS_HTTPS_MIN_INTERNAL_BLOCK 24000U
 #define RSS_FETCH_INTERVAL_MS (30UL * 60UL * 1000)
@@ -51,10 +52,42 @@ static RssCache s_cache = {};
 static portMUX_TYPE s_rssMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool s_fetchRequested = false;
 static volatile bool s_fetchBusy = false;
+static volatile bool s_retryPending = false;
 static volatile bool s_freshFetchPending = false;
+static unsigned long s_lastAttemptMs = 0;
 static RssFeedSnapshot s_parseOut = {};
 static RssStreamParser s_streamParser = {};
 static uint8_t s_streamChunk[RSS_STREAM_CHUNK_BYTES];
+
+static size_t utf8PrefixBytes(const char *text, size_t maxBytes) {
+  size_t used = 0;
+  while (text != nullptr && used < maxBytes && text[used] != '\0') {
+    const unsigned char lead = (unsigned char)text[used];
+    size_t charLen = 0;
+    if (lead < 0x80) {
+      charLen = 1;
+    } else if ((lead & 0xE0) == 0xC0) {
+      charLen = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+      charLen = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+      charLen = 4;
+    } else {
+      break;
+    }
+
+    if (used + charLen > maxBytes) {
+      break;
+    }
+    for (size_t i = 1; i < charLen; i++) {
+      if (((unsigned char)text[used + i] & 0xC0) != 0x80) {
+        return used;
+      }
+    }
+    used += charLen;
+  }
+  return used;
+}
 
 static void copyText(char *out, size_t outLen, const char *in) {
   if (out == nullptr || outLen == 0) {
@@ -64,22 +97,37 @@ static void copyText(char *out, size_t outLen, const char *in) {
     out[0] = '\0';
     return;
   }
-  strncpy(out, in, outLen - 1);
-  out[outLen - 1] = '\0';
+  const size_t inputLen = strlen(in);
+  size_t copyLen = inputLen < outLen ? inputLen : outLen - 1;
+  memcpy(out, in, copyLen);
+  if (copyLen < inputLen) {
+    copyLen = utf8PrefixBytes(out, copyLen);
+  }
+  out[copyLen] = '\0';
 }
 
 void rss_service_init(void) {
+  portENTER_CRITICAL(&s_rssMux);
   memset(&s_cache, 0, sizeof(s_cache));
+  s_fetchRequested = false;
+  s_fetchBusy = false;
+  s_retryPending = false;
+  s_freshFetchPending = false;
+  s_lastAttemptMs = 0;
+  portEXIT_CRITICAL(&s_rssMux);
+  memset(&s_parseOut, 0, sizeof(s_parseOut));
+  memset(&s_streamParser, 0, sizeof(s_streamParser));
 }
 
 static bool cache_is_stale(void) {
   portENTER_CRITICAL(&s_rssMux);
-  const RssCache cache = s_cache;
+  const bool valid = s_cache.valid;
+  const unsigned long lastFetchMs = s_cache.lastFetchMs;
   portEXIT_CRITICAL(&s_rssMux);
-  if (!cache.valid || cache.lastFetchMs == 0) {
+  if (!valid || lastFetchMs == 0) {
     return true;
   }
-  return (millis() - cache.lastFetchMs) >= RSS_FETCH_INTERVAL_MS;
+  return (millis() - lastFetchMs) >= RSS_FETCH_INTERVAL_MS;
 }
 
 bool rss_service_is_stale(void) {
@@ -97,14 +145,12 @@ static void snapshot_from_cache(RssFeedSnapshot *out) {
   if (out == nullptr) {
     return;
   }
+  memset(out, 0, sizeof(*out));
   portENTER_CRITICAL(&s_rssMux);
-  const RssCache cache = s_cache;
-  out->count = cache.count;
-  out->valid = cache.valid;
-  if (cache.valid && cache.count > 0) {
-    memcpy(out->items, cache.items, sizeof(out->items));
-  } else {
-    out->count = 0;
+  out->count = s_cache.count;
+  out->valid = s_cache.valid;
+  if (s_cache.valid && s_cache.count > 0) {
+    memcpy(out->items, s_cache.items, sizeof(out->items));
   }
   portEXIT_CRITICAL(&s_rssMux);
 }
@@ -190,9 +236,7 @@ static void copyRawXmlField(const char *contentStart, size_t rawLen, char *temp,
   temp[copyLen] = '\0';
 
   if (rawLen >= tempLen) {
-    while (copyLen > 0 && ((unsigned char)temp[copyLen - 1] & 0xC0) == 0x80) {
-      copyLen--;
-    }
+    copyLen = utf8PrefixBytes(temp, copyLen);
     temp[copyLen] = '\0';
   }
 
@@ -516,6 +560,7 @@ static bool httpsStreamParse(RssFeedSnapshot *out) {
   out->valid = false;
   memset(&s_streamParser, 0, sizeof(s_streamParser));
   size_t totalRead = 0;
+  unsigned long lastDataMs = millis();
 
   while (http.connected() || stream->available() > 0) {
     if (out->count >= RSS_MAX_ITEMS) {
@@ -525,6 +570,10 @@ static bool httpsStreamParse(RssFeedSnapshot *out) {
     const int avail = stream->available();
     if (avail <= 0) {
       if (!http.connected()) {
+        break;
+      }
+      if ((millis() - lastDataMs) >= RSS_HTTP_TIMEOUT_MS) {
+        Serial.println("[RSS] stream idle timeout");
         break;
       }
       delay(1);
@@ -539,6 +588,7 @@ static bool httpsStreamParse(RssFeedSnapshot *out) {
       break;
     }
 
+    lastDataMs = millis();
     totalRead += (size_t)n;
     if (totalRead > RSS_MAX_STREAM_BYTES) {
       Serial.println("[RSS] stream limit reached");
@@ -590,9 +640,13 @@ void rss_service_poll(bool allowNetwork) {
     return;
   }
 
+  const unsigned long nowMs = millis();
   bool shouldFetch = false;
   portENTER_CRITICAL(&s_rssMux);
-  if (s_fetchRequested && !s_fetchBusy) {
+  const bool retryDue = s_retryPending &&
+                        (s_lastAttemptMs == 0 ||
+                         (nowMs - s_lastAttemptMs) >= RSS_RETRY_INTERVAL_MS);
+  if (!s_fetchBusy && (s_fetchRequested || retryDue)) {
     shouldFetch = true;
   }
   portEXIT_CRITICAL(&s_rssMux);
@@ -603,7 +657,6 @@ void rss_service_poll(bool allowNetwork) {
 
   if (!rss_https_ram_ready()) {
     static unsigned long s_lastRamDeferLogMs = 0;
-    const unsigned long nowMs = millis();
     if (s_lastRamDeferLogMs == 0 || (nowMs - s_lastRamDeferLogMs) >= 5000UL) {
       s_lastRamDeferLogMs = nowMs;
       Serial.printf("[RSS] waiting RAM free=%u block=%u\r\n",
@@ -614,40 +667,58 @@ void rss_service_poll(bool allowNetwork) {
   }
 
   portENTER_CRITICAL(&s_rssMux);
-  s_fetchRequested = false;
-  s_fetchBusy = true;
+  const bool retryStillDue = s_retryPending &&
+                             (s_lastAttemptMs == 0 ||
+                              (nowMs - s_lastAttemptMs) >= RSS_RETRY_INTERVAL_MS);
+  if (!s_fetchBusy && (s_fetchRequested || retryStillDue)) {
+    s_fetchRequested = false;
+    s_retryPending = false;
+    s_fetchBusy = true;
+    s_lastAttemptMs = nowMs;
+  } else {
+    shouldFetch = false;
+  }
   portEXIT_CRITICAL(&s_rssMux);
+
+  if (!shouldFetch) {
+    return;
+  }
 
   const bool ok = rss_service_fetch_internal();
 
   portENTER_CRITICAL(&s_rssMux);
   if (ok) {
     s_freshFetchPending = true;
+    s_retryPending = false;
   } else {
-    s_fetchRequested = true;
+    s_retryPending = true;
   }
   s_fetchBusy = false;
   portEXIT_CRITICAL(&s_rssMux);
 }
 
 void rss_service_request_fetch(bool force) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[RSS] WiFi offline");
-    return;
-  }
-
   if (!force && !cache_is_stale()) {
     return;
   }
 
-  if (rss_service_is_busy() && !force) {
-    return;
-  }
-
+  bool queued = false;
   portENTER_CRITICAL(&s_rssMux);
-  s_fetchRequested = true;
+  if (force) {
+    s_retryPending = false;
+    s_fetchRequested = true;
+    queued = true;
+  } else if (!s_fetchBusy && !s_fetchRequested && !s_retryPending) {
+    s_fetchRequested = true;
+    queued = true;
+  }
   portEXIT_CRITICAL(&s_rssMux);
-  Serial.println("[RSS] fetch queued");
+
+  if (queued) {
+    Serial.println(WiFi.status() == WL_CONNECTED ?
+                       "[RSS] fetch queued" :
+                       "[RSS] fetch queued; waiting for WiFi");
+  }
 }
 
 bool rss_service_is_busy(void) {
@@ -672,11 +743,17 @@ void rss_service_get_snapshot(RssFeedSnapshot *out) {
   snapshot_from_cache(out);
 }
 
-const char *rss_service_tile_preview(void) {
-  RssFeedSnapshot snap = {};
-  snapshot_from_cache(&snap);
-  if (!snap.valid || snap.count <= 0) {
-    return "--";
+bool rss_service_get_tile_preview(char *out, size_t outLen) {
+  if (out == nullptr || outLen == 0) {
+    return false;
   }
-  return snap.items[0].title;
+
+  out[0] = '\0';
+  portENTER_CRITICAL(&s_rssMux);
+  const bool available = s_cache.valid && s_cache.count > 0;
+  if (available) {
+    copyText(out, outLen, s_cache.items[0].title);
+  }
+  portEXIT_CRITICAL(&s_rssMux);
+  return available;
 }

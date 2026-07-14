@@ -26,6 +26,6 @@ bool rss_service_is_busy(void);
 bool rss_service_consume_fresh_fetch(void);
 bool rss_service_is_stale(void);
 void rss_service_get_snapshot(RssFeedSnapshot *out);
-const char *rss_service_tile_preview(void);
+bool rss_service_get_tile_preview(char *out, size_t outLen);
 
 #endif

@@ -1544,13 +1544,11 @@ void loop() {
                                  answersIdle &&
                                  voiceIdle &&
                                  speakerIdle;
-  serviceNetworkStateMachine(allowBlockingWork);
-  if (networkWorkAllowed && wifiConnected && !epaper_upload_active()) {
-    const bool rssPollAllowed =
-        ui_nav_is_rss() || (!weather_service_is_busy() && !stock_service_is_busy());
-    if (rssPollAllowed) {
-      rss_service_poll(true);
-    }
+  const bool rssPending = rss_service_is_busy();
+  serviceNetworkStateMachine(allowBlockingWork && !rssPending);
+  if (allowBlockingWork && wifiConnected &&
+      !weather_service_is_busy() && !stock_service_is_busy()) {
+    rss_service_poll(true);
   }
   serviceStockNameRetry(wifiConnected, inputIdle && visionIdle && answersIdle && voiceIdle && speakerIdle);
 
