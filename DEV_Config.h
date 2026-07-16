@@ -42,6 +42,8 @@
 #define DEV_Delay_ms(__xms) delay(__xms)
 
 UBYTE DEV_Module_Init(void);
+/** Restore EPD BUSY (GPIO1) after battery ADC shares the same pin. */
+void DEV_EPD_BusyPinRestore(void);
 void DEV_SPI_WriteByte(UBYTE data);
 void DEV_SPI_Write_nByte(UBYTE *pData, UDOUBLE len);
 

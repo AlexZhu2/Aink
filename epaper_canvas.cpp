@@ -116,6 +116,9 @@ bool epaper_upload_mode_async(bool fullInit, bool fastPartial) {
     return false;
   }
 
+  /* Battery ADC shares GPIO1 with BUSY; restore before any wait. */
+  DEV_EPD_BusyPinRestore();
+
   if (fullInit || !s_epaperPartialReady) {
     Serial.println("[EPD] upload full init...");
     EPD_1IN54_V2_Init();
@@ -158,4 +161,14 @@ bool epaper_poll_upload(void) {
 
 bool epaper_upload_active(void) {
   return s_uploadState != EPAPER_UPLOAD_IDLE;
+}
+
+void epaper_abort_upload(void) {
+  if (s_uploadMirrored) {
+    mirrorLogicalXInPlace();
+    s_uploadMirrored = false;
+  }
+  EPD_1IN54_V2_CancelBusyWait();
+  s_uploadState = EPAPER_UPLOAD_IDLE;
+  s_epaperPartialReady = false;
 }

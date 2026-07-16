@@ -11,4 +11,10 @@ void ui_status_bar_update(int batteryPercent, bool wifiConnected,
                           bool showWeather, WeatherIconKind weatherIcon,
                           int weatherTempC);
 
+/* Top-layer sleep banner (visible on home and fullscreen pages). */
+void ui_modem_sleep_overlay_set(bool active);
+/* Optional detail under the banner title (e.g. last sleep duration). */
+void ui_modem_sleep_overlay_set_detail(const char *detail);
+void ui_modem_sleep_overlay_refresh_locale(void);
+
 #endif

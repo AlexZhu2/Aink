@@ -23,6 +23,10 @@ UBYTE DEV_Module_Init(void) {
   return 0;
 }
 
+void DEV_EPD_BusyPinRestore(void) {
+  pinMode(EPD_BUSY_PIN, INPUT);
+}
+
 void DEV_SPI_WriteByte(UBYTE data) {
   SPI.beginTransaction(epd_spi_settings);
   SPI.transfer(data);

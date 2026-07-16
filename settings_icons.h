@@ -257,4 +257,40 @@ static const uint32_t life_grid_bitmap[SETTINGS_ICON_SIZE] = {
   0x00000000u,
 };
 
+/** Newspaper icon (news tile). */
+static const uint32_t news_tile_bitmap[SETTINGS_ICON_SIZE] = {
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x07ffffe0u,
+  0x08000010u,
+  0x08000010u,
+  0x0ffff810u,
+  0x08000010u,
+  0x0ffff810u,
+  0x08000010u,
+  0x0ffff810u,
+  0x08000010u,
+  0x07ffffe0u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+  0x00000000u,
+};
+
 #endif

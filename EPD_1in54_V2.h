@@ -16,6 +16,7 @@ void EPD_1IN54_V2_BeginBusyWait(const char *label);
 // Returns true while the tracked BUSY wait is still pending.
 bool EPD_1IN54_V2_PollBusyWait(void);
 bool EPD_1IN54_V2_BusyWaitActive(void);
+void EPD_1IN54_V2_CancelBusyWait(void);
 void EPD_1IN54_V2_Display(UBYTE *Image);
 void EPD_1IN54_V2_DisplayAsync(UBYTE *Image);
 void EPD_1IN54_V2_DisplayPartBaseImage(UBYTE *Image);

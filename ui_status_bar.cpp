@@ -1,7 +1,9 @@
 #include "ui_status_bar.h"
 
+#include "app_locale.h"
 #include "epaper_canvas.h"
 #include "ui_fonts.h"
+#include "EPD_1in54_V2.h"
 
 #include <Arduino.h>
 #include <lvgl.h>
@@ -15,6 +17,7 @@
 #define BATTERY_ICON_H    8
 #define STATUS_WIFI_ICON_Y    4
 #define STATUS_WEATHER_ICON_Y 0
+#define SLEEP_BANNER_H        24
 
 static lv_obj_t *s_bar = nullptr;
 static lv_obj_t *s_wifiCanvas = nullptr;
@@ -23,6 +26,10 @@ static lv_obj_t *s_weatherCanvas = nullptr;
 static lv_obj_t *s_tempLabel = nullptr;
 static lv_obj_t *s_batteryCanvas = nullptr;
 static lv_obj_t *s_divider = nullptr;
+static lv_obj_t *s_sleepBanner = nullptr;
+static lv_obj_t *s_sleepLabel = nullptr;
+static bool s_sleepOverlayActive = false;
+static char s_sleepDetail[40] = "";
 
 static lv_color_t s_wifiBuf[WIFI_ICON_W * WIFI_ICON_H];
 static lv_color_t s_weatherBuf[WEATHER_ICON_SIZE * WEATHER_ICON_SIZE];
@@ -197,7 +204,87 @@ void ui_status_bar_init(void) {
   lv_obj_set_style_border_width(s_divider, 0, LV_PART_MAIN);
   lv_obj_clear_flag(s_divider, LV_OBJ_FLAG_SCROLLABLE);
 
+  s_sleepBanner = lv_obj_create(top);
+  lv_obj_set_size(s_sleepBanner, EPD_1IN54_V2_WIDTH, SLEEP_BANNER_H);
+  lv_obj_set_pos(s_sleepBanner, 0, EPD_1IN54_V2_HEIGHT - SLEEP_BANNER_H);
+  lv_obj_set_style_bg_color(s_sleepBanner, lv_color_white(), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_sleepBanner, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_sleepBanner, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_sleepBanner, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_sleepBanner, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(s_sleepBanner, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(s_sleepBanner, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(s_sleepBanner, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t *sleepRule = lv_obj_create(s_sleepBanner);
+  lv_obj_set_size(sleepRule, EPD_1IN54_V2_WIDTH, 1);
+  lv_obj_set_pos(sleepRule, 0, 0);
+  lv_obj_set_style_bg_color(sleepRule, lv_color_black(), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(sleepRule, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(sleepRule, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(sleepRule, LV_OBJ_FLAG_SCROLLABLE);
+
+  s_sleepLabel = lv_label_create(s_sleepBanner);
+  styleStatusText(s_sleepLabel);
+  lv_obj_set_width(s_sleepLabel, EPD_1IN54_V2_WIDTH);
+  lv_obj_set_style_text_align(s_sleepLabel, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_pos(s_sleepLabel, 0, 4);
+  lv_label_set_text(s_sleepLabel, app_tr(TR_MODEM_SLEEP));
+
   ui_status_bar_update(-1, false, false, WEATHER_ICON_CLOUDY, 0);
+}
+
+void ui_modem_sleep_overlay_set(bool active) {
+  s_sleepOverlayActive = active;
+  if (!active) {
+    s_sleepDetail[0] = '\0';
+  }
+  if (s_sleepBanner == nullptr) {
+    return;
+  }
+  if (s_sleepLabel != nullptr) {
+    if (s_sleepDetail[0] != '\0') {
+      lv_label_set_text(s_sleepLabel, s_sleepDetail);
+    } else {
+      lv_label_set_text(s_sleepLabel, app_tr(TR_MODEM_SLEEP));
+    }
+  }
+  if (active) {
+    lv_obj_clear_flag(s_sleepBanner, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(s_sleepBanner, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_invalidate(s_sleepBanner);
+}
+
+void ui_modem_sleep_overlay_set_detail(const char *detail) {
+  if (detail == nullptr || detail[0] == '\0') {
+    s_sleepDetail[0] = '\0';
+  } else {
+    snprintf(s_sleepDetail, sizeof(s_sleepDetail), "%s", detail);
+  }
+  if (s_sleepLabel == nullptr || !s_sleepOverlayActive) {
+    return;
+  }
+  if (s_sleepDetail[0] != '\0') {
+    lv_label_set_text(s_sleepLabel, s_sleepDetail);
+  } else {
+    lv_label_set_text(s_sleepLabel, app_tr(TR_MODEM_SLEEP));
+  }
+  lv_obj_invalidate(s_sleepBanner);
+}
+
+void ui_modem_sleep_overlay_refresh_locale(void) {
+  if (s_sleepLabel != nullptr) {
+    if (s_sleepDetail[0] != '\0') {
+      lv_label_set_text(s_sleepLabel, s_sleepDetail);
+    } else {
+      lv_label_set_text(s_sleepLabel, app_tr(TR_MODEM_SLEEP));
+    }
+    if (s_sleepOverlayActive) {
+      lv_obj_invalidate(s_sleepBanner);
+    }
+  }
 }
 
 void ui_status_bar_set_visible(bool visible) {

@@ -12,6 +12,8 @@
 #include "ui_voice.h"
 #include "ui_clock.h"
 #include "ui_life.h"
+#include "ui_rss.h"
+#include "ui_status_bar.h"
 
 static AppLanguage s_lang = APP_LANG_EN;
 
@@ -22,6 +24,7 @@ static const char *kStringsEn[TR_COUNT] = {
     "Answers",
     "Stocks",
     "Life",
+    "News",
     "Settings",
     "Online",
     "Offline",
@@ -57,6 +60,8 @@ static const char *kStringsEn[TR_COUNT] = {
     "WiFi",
     "Model",
     "Display",
+    "System",
+    "Weather",
     "About",
     "Network",
     "Reconfigure WiFi",
@@ -85,6 +90,11 @@ static const char *kStringsEn[TR_COUNT] = {
     "Show date",
     "On",
     "Off",
+    "Auto sleep",
+    "5 minutes",
+    "10 minutes",
+    "30 minutes",
+    "Never",
 
     "No data",
     "Check WiFi",
@@ -152,6 +162,14 @@ static const char *kStringsEn[TR_COUNT] = {
     "Work progress",
     "A Calendar",
     "A Dashboard",
+
+    "A next  A2 refresh",
+    "No headlines",
+    "Loading...",
+    "Scan",
+    "SSPai",
+
+    "Sleep mode",
 };
 
 static const char *kStringsZh[TR_COUNT] = {
@@ -161,6 +179,7 @@ static const char *kStringsZh[TR_COUNT] = {
     "答案之书",
     "股票",
     "生命游戏",
+    "新闻",
     "设置",
     "在线",
     "离线",
@@ -196,6 +215,8 @@ static const char *kStringsZh[TR_COUNT] = {
     "无线",
     "模型",
     "显示",
+    "系统",
+    "天气",
     "关于",
     "网络",
     "重新配网",
@@ -224,6 +245,11 @@ static const char *kStringsZh[TR_COUNT] = {
     "显示日期",
     "开",
     "关",
+    "自动休眠",
+    "5 分钟",
+    "10 分钟",
+    "30 分钟",
+    "永不休眠",
 
     "暂无数据",
     "请检查网络",
@@ -291,6 +317,14 @@ static const char *kStringsZh[TR_COUNT] = {
     "今日进度",
     "A 月历",
     "A 仪表盘",
+
+    "A下一条 A2刷新",
+    "暂无新闻",
+    "加载中...",
+    "扫码",
+    "少数派",
+
+    "睡眠模式",
 };
 
 void app_locale_init(void) {
@@ -345,4 +379,6 @@ void app_locale_refresh_all(void) {
   ui_voice_refresh();
   ui_clock_refresh_locale();
   ui_life_refresh_locale();
+  ui_rss_refresh_locale();
+  ui_modem_sleep_overlay_refresh_locale();
 }

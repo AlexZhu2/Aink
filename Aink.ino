@@ -4,6 +4,9 @@
 #include <Preferences.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp_sleep.h>
+#include <driver/gpio.h>
+#include <stdio.h>
 #include <time.h>
 #include "EPD_1in54_V2.h"
 #include "weather_icons.h"
@@ -24,6 +27,8 @@
 #include "ui_voice.h"
 #include "ui_clock.h"
 #include "ui_life.h"
+#include "ui_rss.h"
+#include "rss_service.h"
 #include "ui_status_bar.h"
 #include "ui_refresh.h"
 #include "settings_api.h"
@@ -31,6 +36,7 @@
 #include "worker_calendar_sync.h"
 #include "voice_service.h"
 #include "speaker_service.h"
+#include "camera_service.h"
 
 extern "C" {
 #include "qrcode.h"
@@ -109,10 +115,20 @@ static bool networkWeatherServicePending = false;
 static bool networkStockForcePending = false;
 static bool networkDnsConfigured = false;
 static unsigned long lastUserInputMs = 0;
+static unsigned long lastUserActionMs = 0;
+static bool modemSleepActive = false;
 static unsigned long wifiConnectStartMs = 0;
 static unsigned long nextWifiAttemptMs = 0;
 static unsigned long ntpSyncStartMs = 0;
 static unsigned long lastSerialHeartbeatMs = 0;
+/* Light-sleep kills USB-Serial; keep stats and dump them after wake. */
+static uint32_t lightSleepCycles = 0;
+static uint32_t lightSleepSessionMs = 0;
+static uint32_t lastLightSleepMs = 0;
+static int lastLightSleepCause = -1;
+static bool lightSleepLogPending = false;
+static bool sleepWakeBannerHold = false;
+static unsigned long sleepWakeBannerHideMs = 0;
 
 #define SERIAL_HEARTBEAT_MS 30000UL
 
@@ -127,6 +143,11 @@ static void enterPortalMode();
 static void refreshMainUiOnDisplay(UiRefreshMode mode);
 static void requestDisplayRefresh(UiRefreshMode mode);
 static void serviceDisplayRefresh(bool force);
+static void exitModemSleep(const char *reason);
+static void enterModemSleep(const char *reason);
+static void enterModemSleepIfIdle(bool wifiConnected);
+static void noteUserAction(void);
+static bool serviceLightSleep(void);
 
 static void setEpaperPixel(UBYTE *image, UWORD lx, UWORD ly, bool black) {
   (void)image;
@@ -329,6 +350,221 @@ static void configureStationDns(void) {
   }
 }
 
+static void restoreUsbSerialAfterLightSleep(void) {
+  /*
+   * USB-Serial/JTAG is gated off for the entire light-sleep window.
+   * Give the host a moment to re-enumerate before printing.
+   */
+  delay(120);
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT)
+  Serial.begin(115200);
+#endif
+}
+
+static void flushPendingLightSleepLog(void) {
+  if (!lightSleepLogPending) {
+    return;
+  }
+  lightSleepLogPending = false;
+  restoreUsbSerialAfterLightSleep();
+  Serial.printf("[Power] Light-Sleep done slept=%lums cause=%d cycles=%lu session=%lums\r\n",
+                (unsigned long)lastLightSleepMs,
+                lastLightSleepCause,
+                (unsigned long)lightSleepCycles,
+                (unsigned long)lightSleepSessionMs);
+  Serial.flush();
+}
+
+static void exitModemSleep(const char *reason) {
+  if (!modemSleepActive) {
+    return;
+  }
+  modemSleepActive = false;
+  flushPendingLightSleepLog();
+
+  /*
+   * Keep the wake-duration banner for one refresh so you can verify sleep
+   * length without USB (USB is dark the whole time the chip is sleeping).
+   */
+  if (sleepWakeBannerHold) {
+    sleepWakeBannerHold = false;
+    sleepWakeBannerHideMs = millis() + 8000UL;
+  } else {
+    ui_modem_sleep_overlay_set(false);
+    sleepWakeBannerHideMs = 0;
+  }
+
+  Serial.printf("[Power] Sleep mode disabled (%s) last_slept=%lums cycles=%lu total=%lums\r\n",
+                reason != nullptr ? reason : "unknown",
+                (unsigned long)lastLightSleepMs,
+                (unsigned long)lightSleepCycles,
+                (unsigned long)lightSleepSessionMs);
+  Serial.flush();
+  lightSleepCycles = 0;
+  lightSleepSessionMs = 0;
+
+  /* WiFi was powered off for light sleep; bring station back up. */
+  networkDnsConfigured = false;
+  networkState = NET_IDLE;
+  nextWifiAttemptMs = 0;
+  if (hasStoredWiFiCredentials()) {
+    (void)startStoredWiFiConnect();
+  }
+  requestDisplayRefresh(UI_REFRESH_FAST);
+}
+
+static void enterModemSleep(const char *reason) {
+  if (portalModeActive || modemSleepActive) {
+    return;
+  }
+  if (displayBootState != DISPLAY_BOOT_READY) {
+    return;
+  }
+
+  /*
+   * Fully power off the radio. Keeping an associated STA through light sleep
+   * causes DTIM wakeups (~modem-sleep power). WIFI_OFF is required for the
+   * milliwatt-range light-sleep numbers in the XIAO wiki.
+   */
+  WiFi.disconnect(true, false);
+  WiFi.mode(WIFI_OFF);
+  networkDnsConfigured = false;
+  networkState = NET_IDLE;
+
+  /* Sense camera draws tens of mA if still initialized. */
+  if (camera_service_is_ready()) {
+    camera_service_pause();
+  }
+
+  modemSleepActive = true;
+  lightSleepCycles = 0;
+  lightSleepSessionMs = 0;
+  lastLightSleepMs = 0;
+  lastLightSleepCause = -1;
+  lightSleepLogPending = false;
+  ui_modem_sleep_overlay_set(true);
+  /*
+   * After this point the chip enters light sleep: USB-Serial goes silent until
+   * a button wake. That silence is expected — check the power meter, then press
+   * A/B and read the post-wake [Power] line / banner detail.
+   */
+  Serial.printf("[Power] Sleep mode enabled (%s); WiFi OFF. "
+                "USB serial will stop until A/B wake.\r\n",
+                reason != nullptr ? reason : "unknown");
+  Serial.flush();
+  requestDisplayRefresh(UI_REFRESH_FAST);
+}
+
+static void noteUserAction(void) {
+  const unsigned long now = millis();
+  lastUserInputMs = now;
+  lastUserActionMs = now;
+  if (modemSleepActive) {
+    exitModemSleep("button");
+  }
+}
+
+static void enterModemSleepIfIdle(bool wifiConnected) {
+  if (portalModeActive || modemSleepActive || !wifiConnected) {
+    return;
+  }
+  if (displayBootState != DISPLAY_BOOT_READY) {
+    return;
+  }
+
+  const unsigned long idleTimeoutMs = settings_api_sleep_idle_ms();
+  if (idleTimeoutMs == 0UL) {
+    return;
+  }
+
+  const unsigned long now = millis();
+  if (lastUserActionMs == 0) {
+    lastUserActionMs = now;
+    return;
+  }
+  if ((now - lastUserActionMs) < idleTimeoutMs) {
+    return;
+  }
+
+  enterModemSleep("idle timeout");
+}
+
+static void configureLightSleepGpioWake(void) {
+  gpio_sleep_set_direction((gpio_num_t)BTN_A_PIN, GPIO_MODE_INPUT);
+  gpio_sleep_set_pull_mode((gpio_num_t)BTN_A_PIN, GPIO_PULLUP_ONLY);
+  gpio_wakeup_enable((gpio_num_t)BTN_A_PIN, GPIO_INTR_LOW_LEVEL);
+
+  gpio_sleep_set_direction((gpio_num_t)BTN_B_PIN, GPIO_MODE_INPUT);
+  gpio_sleep_set_pull_mode((gpio_num_t)BTN_B_PIN, GPIO_PULLUP_ONLY);
+  gpio_wakeup_enable((gpio_num_t)BTN_B_PIN, GPIO_INTR_LOW_LEVEL);
+
+  esp_sleep_enable_gpio_wakeup();
+}
+
+/* Returns true if light sleep was entered (caller should skip delay). */
+static bool serviceLightSleep(void) {
+  if (!modemSleepActive || portalModeActive) {
+    return false;
+  }
+  if (displayBootState != DISPLAY_BOOT_READY) {
+    return false;
+  }
+  if (displayRefreshPending || epaper_upload_active()) {
+    return false;
+  }
+  if (speaker_service_is_playing() || voice_service_is_busy() ||
+      ui_vision_is_busy() || ui_answers_is_busy()) {
+    return false;
+  }
+
+  /* Wait for button release so LOW-level wake does not instantly re-trigger. */
+  if (digitalRead(BTN_A_PIN) == LOW || digitalRead(BTN_B_PIN) == LOW) {
+    return false;
+  }
+
+  configureLightSleepGpioWake();
+  /* Do not print here in a loop — USB dies for the whole sleep window. */
+  Serial.flush();
+
+  const unsigned long sleepStartedMs = millis();
+  const esp_err_t err = esp_light_sleep_start();
+  const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  const unsigned long sleptMs = millis() - sleepStartedMs;
+
+  lightSleepCycles++;
+  lastLightSleepMs = (uint32_t)sleptMs;
+  lastLightSleepCause = (int)cause;
+  lightSleepSessionMs += (uint32_t)sleptMs;
+  lightSleepLogPending = true;
+  (void)err;
+
+  /*
+   * Light-sleep stops the CPU, so button ISR edges during sleep are often missed.
+   * Treat GPIO wake as an explicit user wake and leave sleep mode here.
+   * USB-Serial only comes back after wake — logs are flushed in exitModemSleep.
+   */
+  if (modemSleepActive && cause == ESP_SLEEP_WAKEUP_GPIO) {
+    char detail[40];
+    snprintf(detail, sizeof(detail), "%s %lu.%lus",
+             app_tr(TR_MODEM_SLEEP),
+             (unsigned long)(sleptMs / 1000UL),
+             (unsigned long)((sleptMs / 100UL) % 10UL));
+    ui_modem_sleep_overlay_set_detail(detail);
+    sleepWakeBannerHold = true;
+    lastUserInputMs = millis();
+    lastUserActionMs = lastUserInputMs;
+    exitModemSleep("gpio-wake");
+  } else if (modemSleepActive && sleptMs < 20UL) {
+    flushPendingLightSleepLog();
+    Serial.println("[Power] Light-Sleep too short; backing off 500ms");
+    Serial.flush();
+    delay(500);
+  }
+
+  delay(20);
+  return true;
+}
+
 static void serviceNetworkStateMachine(bool allowBlockingWork) {
   if (portalModeActive) {
     return;
@@ -336,6 +572,11 @@ static void serviceNetworkStateMachine(bool allowBlockingWork) {
 
   const unsigned long now = millis();
   const bool wifiConnected = isWifiConnected();
+
+  /* Intentional WIFI_OFF during sleep must not trigger reconnect/portal. */
+  if (modemSleepActive) {
+    return;
+  }
 
   switch (networkState) {
     case NET_WIFI_WAIT:
@@ -521,6 +762,17 @@ static void drawSetupScreen(UBYTE *image) {
 }
 
 static void showSetupScreenOnEpaper() {
+  /*
+   * Battery ADC shares EPD BUSY (GPIO1). After normal UI has read battery,
+   * BUSY reads stuck LOW and Init/Display finish in 0ms with no visible update.
+   * Cold-boot portal works because battery hasn't been sampled yet.
+   */
+  DEV_EPD_BusyPinRestore();
+  epaper_abort_upload();
+  displayRefreshPending = false;
+  pendingDisplayRefreshMode = UI_REFRESH_NONE;
+  pendingDisplayRequestCount = 0;
+
   epaper_set_portal_mirror(true);
   drawSetupScreen(epaper_get_buffer());
   EPD_1IN54_V2_Init();
@@ -785,6 +1037,9 @@ static void handlePortalRoot() {
     button { margin-top: 18px; width: 100%; padding: 12px; font-size: 16px; border: 0; border-radius: 8px; background: #111; color: #fff; }
     .hint { margin-top: 16px; font-size: 13px; color: #666; line-height: 1.5; }
     .badge { display: inline-block; margin-left: 8px; padding: 2px 8px; font-size: 12px; color: #0a6; background: #e8f8ef; border-radius: 999px; vertical-align: middle; }
+    .feed-list { display: grid; gap: 8px; margin-top: 8px; }
+    .feed-item { display: flex; align-items: center; gap: 8px; font-size: 15px; color: #222; }
+    .feed-item input { width: auto; margin: 0; }
     a { color: #06c; }
   </style>
 </head>
@@ -1077,6 +1332,7 @@ static void setupPortalWebRoutes() {
 }
 
 static void enterPortalMode() {
+  exitModemSleep("portal");
   buildPortalApSsid();
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(portalApSsid);
@@ -1105,6 +1361,7 @@ static bool serviceDisplayBootState(void) {
     epaper_mark_partial_ready();
     displayBootState = DISPLAY_BOOT_READY;
     lastUserInputMs = millis();
+    lastUserActionMs = lastUserInputMs;
     Serial.println("[EPD] partial ready after async boot splash");
     return true;
   }
@@ -1143,6 +1400,8 @@ static void initApplicationUi(void) {
   ui_voice_init();
   ui_clock_init();
   ui_life_init();
+  rss_service_init();
+  ui_rss_init();
   ui_settings_init();
   ui_nav_init();
   ui_lvgl_prepare();
@@ -1161,8 +1420,11 @@ static void startNormalOperation() {
 
   resetNetworkAndServiceState();
   lastUserInputMs = 0;
+  lastUserActionMs = millis();
+  modemSleepActive = false;
 
   initApplicationUi();
+  ui_modem_sleep_overlay_set(false);
 
   speaker_service_init();
   speaker_service_play_boot_chime_async();
@@ -1187,6 +1449,9 @@ static int readBatteryPercent() {
     mvSum += analogReadMilliVolts(BATTERY_ADC_GPIO);
     delay(2);
   }
+  /* GPIO1 is shared with EPD BUSY — put it back before any panel wait. */
+  DEV_EPD_BusyPinRestore();
+
   float voltage = (mvSum / 8.0f) * 2.0f / 1000.0f;
 
   if (voltage < 0.3f) {
@@ -1230,6 +1495,8 @@ static void refreshMainUiOnDisplay(UiRefreshMode mode) {
       }
     } else if (ui_nav_is_clock()) {
       ui_clock_refresh();
+    } else if (ui_nav_is_rss()) {
+      ui_rss_refresh();
     } else if (ui_nav_is_answers()) {
       ui_answers_refresh();
     } else if (ui_nav_is_home()) {
@@ -1442,7 +1709,18 @@ void loop() {
 
   BtnAction btnAction = BTN_ACTION_NONE;
   while (btn_input_consume(&btnAction)) {
-    lastUserInputMs = millis();
+    if (btnAction == BTN_ACTION_MODEM_SLEEP) {
+      if (modemSleepActive) {
+        lastUserInputMs = millis();
+        lastUserActionMs = lastUserInputMs;
+        exitModemSleep("ab-combo");
+      } else {
+        enterModemSleep("ab-combo");
+      }
+      continue;
+    }
+
+    noteUserAction();
     UiRefreshMode navMode = UI_REFRESH_NONE;
     if (ui_nav_handle(btnAction, &navMode)) {
       requestDisplayRefresh(navMode);
@@ -1479,6 +1757,11 @@ void loop() {
   UiRefreshMode stockMode = UI_REFRESH_NONE;
   if (ui_stock_service(&stockMode)) {
     requestDisplayRefresh(stockMode);
+  }
+
+  UiRefreshMode rssMode = UI_REFRESH_NONE;
+  if (ui_rss_service(&rssMode)) {
+    requestDisplayRefresh(rssMode);
   }
 
   const bool wifiConnected = isWifiConnected();
@@ -1522,25 +1805,51 @@ void loop() {
   const bool voiceIdle = !voiceBusy;
   const bool speakerIdle = !speaker_service_is_playing();
   const bool networkWorkAllowed = displayBootState == DISPLAY_BOOT_READY;
-  serviceNetworkStateMachine(networkWorkAllowed &&
-                             !displayRefreshPending &&
-                             !epaper_upload_active() &&
-                             inputIdle &&
-                             visionIdle &&
-                             answersIdle &&
-                             voiceIdle &&
-                             speakerIdle);
-  serviceStockNameRetry(wifiConnected, inputIdle && visionIdle && answersIdle && voiceIdle && speakerIdle);
+  const bool allowBlockingWork = networkWorkAllowed &&
+                                 !modemSleepActive &&
+                                 !displayRefreshPending &&
+                                 !epaper_upload_active() &&
+                                 inputIdle &&
+                                 visionIdle &&
+                                 answersIdle &&
+                                 voiceIdle &&
+                                 speakerIdle;
+  const bool rssPending = rss_service_is_busy();
+  serviceNetworkStateMachine(allowBlockingWork && !rssPending);
+  if (allowBlockingWork && wifiConnected &&
+      !weather_service_is_busy() && !stock_service_is_busy()) {
+    rss_service_poll(true);
+  }
+  serviceStockNameRetry(wifiConnected,
+                        !modemSleepActive && inputIdle && visionIdle &&
+                            answersIdle && voiceIdle && speakerIdle);
+
+  enterModemSleepIfIdle(wifiConnected);
 
   const unsigned long nowMs = millis();
+  if (sleepWakeBannerHideMs != 0 && nowMs >= sleepWakeBannerHideMs) {
+    sleepWakeBannerHideMs = 0;
+    ui_modem_sleep_overlay_set(false);
+    requestDisplayRefresh(UI_REFRESH_FAST);
+  }
   if (displayBootState == DISPLAY_BOOT_READY &&
+      !modemSleepActive &&
       (lastSerialHeartbeatMs == 0 || (nowMs - lastSerialHeartbeatMs) >= SERIAL_HEARTBEAT_MS)) {
     lastSerialHeartbeatMs = nowMs;
-    Serial.printf("[Alive] uptime=%lus heap=%u internal=%u\r\n",
+    Serial.printf("[Alive] uptime=%lus heap=%u internal=%u "
+                  "last_slept=%lums sleep_cycles=%lu\r\n",
                   nowMs / 1000UL,
                   (unsigned)ESP.getFreeHeap(),
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned long)lastLightSleepMs,
+                  (unsigned long)lightSleepCycles);
   }
 
-  delay(50);
+  if (modemSleepActive) {
+    if (!serviceLightSleep()) {
+      delay(50);
+    }
+  } else {
+    delay(50);
+  }
 }
