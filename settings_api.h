@@ -49,4 +49,17 @@ void settings_api_set_clock_use_24h(bool use24h);
 bool settings_api_clock_show_date(void);
 void settings_api_set_clock_show_date(bool showDate);
 
+typedef enum {
+  SLEEP_IDLE_5M = 0,
+  SLEEP_IDLE_10M = 1,
+  SLEEP_IDLE_30M = 2,
+  SLEEP_IDLE_NEVER = 3,
+  SLEEP_IDLE_COUNT = 4,
+} SleepIdleOption;
+
+SleepIdleOption settings_api_get_sleep_idle(void);
+void settings_api_set_sleep_idle(SleepIdleOption option);
+/** Idle timeout in ms before auto sleep; 0 means never auto-sleep. */
+unsigned long settings_api_sleep_idle_ms(void);
+
 #endif

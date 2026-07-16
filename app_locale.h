@@ -50,6 +50,8 @@ typedef enum {
   TR_WIFI,
   TR_MODEL,
   TR_DISPLAY,
+  TR_SYSTEM,
+  TR_WEATHER_MENU,
   TR_ABOUT,
   TR_NETWORK,
   TR_RECONFIGURE_WIFI,
@@ -78,6 +80,11 @@ typedef enum {
   TR_CLOCK_SHOW_DATE,
   TR_ON,
   TR_OFF,
+  TR_SLEEP,
+  TR_SLEEP_5M,
+  TR_SLEEP_10M,
+  TR_SLEEP_30M,
+  TR_SLEEP_NEVER,
 
   TR_NO_DATA,
   TR_CHECK_WIFI,
@@ -151,6 +158,8 @@ typedef enum {
   TR_RSS_LOADING,
   TR_RSS_SCAN,
   TR_RSS_SOURCE,
+
+  TR_MODEM_SLEEP,
 
   TR_COUNT,
 } AppStrId;

@@ -148,6 +148,11 @@ bool EPD_1IN54_V2_BusyWaitActive(void)
     return epd_busy_wait_active;
 }
 
+void EPD_1IN54_V2_CancelBusyWait(void)
+{
+    epd_busy_wait_active = false;
+}
+
 static uint32_t EPD_1IN54_V2_WaitBusyWithDelay(uint32_t delayMs)
 {
     while (EPD_1IN54_V2_PollBusyWait()) {

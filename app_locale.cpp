@@ -13,6 +13,7 @@
 #include "ui_clock.h"
 #include "ui_life.h"
 #include "ui_rss.h"
+#include "ui_status_bar.h"
 
 static AppLanguage s_lang = APP_LANG_EN;
 
@@ -59,6 +60,8 @@ static const char *kStringsEn[TR_COUNT] = {
     "WiFi",
     "Model",
     "Display",
+    "System",
+    "Weather",
     "About",
     "Network",
     "Reconfigure WiFi",
@@ -87,6 +90,11 @@ static const char *kStringsEn[TR_COUNT] = {
     "Show date",
     "On",
     "Off",
+    "Auto sleep",
+    "5 minutes",
+    "10 minutes",
+    "30 minutes",
+    "Never",
 
     "No data",
     "Check WiFi",
@@ -160,6 +168,8 @@ static const char *kStringsEn[TR_COUNT] = {
     "Loading...",
     "Scan",
     "SSPai",
+
+    "Sleep mode",
 };
 
 static const char *kStringsZh[TR_COUNT] = {
@@ -205,6 +215,8 @@ static const char *kStringsZh[TR_COUNT] = {
     "无线",
     "模型",
     "显示",
+    "系统",
+    "天气",
     "关于",
     "网络",
     "重新配网",
@@ -233,6 +245,11 @@ static const char *kStringsZh[TR_COUNT] = {
     "显示日期",
     "开",
     "关",
+    "自动休眠",
+    "5 分钟",
+    "10 分钟",
+    "30 分钟",
+    "永不休眠",
 
     "暂无数据",
     "请检查网络",
@@ -306,6 +323,8 @@ static const char *kStringsZh[TR_COUNT] = {
     "加载中...",
     "扫码",
     "少数派",
+
+    "睡眠模式",
 };
 
 void app_locale_init(void) {
@@ -361,4 +380,5 @@ void app_locale_refresh_all(void) {
   ui_clock_refresh_locale();
   ui_life_refresh_locale();
   ui_rss_refresh_locale();
+  ui_modem_sleep_overlay_refresh_locale();
 }

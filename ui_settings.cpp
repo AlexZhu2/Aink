@@ -22,8 +22,10 @@ enum SettingsPage {
   SETTINGS_PAGE_MODEL,
   SETTINGS_PAGE_MODEL_PROVIDER,
   SETTINGS_PAGE_MODEL_PRESET,
+  SETTINGS_PAGE_WEATHER,
   SETTINGS_PAGE_STOCKS,
-  SETTINGS_PAGE_DISPLAY,
+  SETTINGS_PAGE_SYSTEM,
+  SETTINGS_PAGE_SLEEP,
   SETTINGS_PAGE_ABOUT,
 };
 
@@ -46,10 +48,13 @@ static SettingsPage settings_page_parent(SettingsPage page) {
     case SETTINGS_PAGE_MODEL_PROVIDER:
     case SETTINGS_PAGE_MODEL_PRESET:
       return SETTINGS_PAGE_MODEL;
+    case SETTINGS_PAGE_SLEEP:
+      return SETTINGS_PAGE_SYSTEM;
     case SETTINGS_PAGE_WIFI:
     case SETTINGS_PAGE_MODEL:
+    case SETTINGS_PAGE_WEATHER:
     case SETTINGS_PAGE_STOCKS:
-    case SETTINGS_PAGE_DISPLAY:
+    case SETTINGS_PAGE_SYSTEM:
     case SETTINGS_PAGE_ABOUT:
       return SETTINGS_PAGE_ROOT;
     default:
@@ -60,9 +65,11 @@ static SettingsPage settings_page_parent(SettingsPage page) {
 static int page_row_count(SettingsPage page) {
   switch (page) {
     case SETTINGS_PAGE_ROOT:
-      return 5;
+      return 6;
     case SETTINGS_PAGE_WIFI:
-      return 7;
+      return 4;
+    case SETTINGS_PAGE_WEATHER:
+      return 3;
     case SETTINGS_PAGE_STOCKS:
       return 3;
     case SETTINGS_PAGE_MODEL:
@@ -71,8 +78,10 @@ static int page_row_count(SettingsPage page) {
       return AI_PROVIDER_COUNT;
     case SETTINGS_PAGE_MODEL_PRESET:
       return ai_provider_model_count(settings_api_get_provider());
-    case SETTINGS_PAGE_DISPLAY:
-      return 6;
+    case SETTINGS_PAGE_SYSTEM:
+      return 4;
+    case SETTINGS_PAGE_SLEEP:
+      return (int)SLEEP_IDLE_COUNT;
     case SETTINGS_PAGE_ABOUT:
       return 2;
     default:
@@ -92,10 +101,14 @@ static const char *page_title(SettingsPage page) {
       return app_tr(TR_PROVIDER_LABEL);
     case SETTINGS_PAGE_MODEL_PRESET:
       return app_tr(TR_MODEL_LABEL);
+    case SETTINGS_PAGE_WEATHER:
+      return app_tr(TR_WEATHER_MENU);
     case SETTINGS_PAGE_STOCKS:
       return app_tr(TR_STOCK_TITLE);
-    case SETTINGS_PAGE_DISPLAY:
-      return app_tr(TR_DISPLAY);
+    case SETTINGS_PAGE_SYSTEM:
+      return app_tr(TR_SYSTEM);
+    case SETTINGS_PAGE_SLEEP:
+      return app_tr(TR_SLEEP);
     case SETTINGS_PAGE_ABOUT:
       return app_tr(TR_ABOUT);
     default:
@@ -107,9 +120,30 @@ static const char *language_value_label(void) {
   return app_locale_get() == APP_LANG_EN ? app_tr(TR_LANG_ENGLISH) : app_tr(TR_LANG_CHINESE);
 }
 
+static AppStrId sleep_option_tr(SleepIdleOption option) {
+  switch (option) {
+    case SLEEP_IDLE_5M:
+      return TR_SLEEP_5M;
+    case SLEEP_IDLE_10M:
+      return TR_SLEEP_10M;
+    case SLEEP_IDLE_30M:
+      return TR_SLEEP_30M;
+    case SLEEP_IDLE_NEVER:
+    default:
+      return TR_SLEEP_NEVER;
+  }
+}
+
+static const char *sleep_value_label(void) {
+  return app_tr(sleep_option_tr(settings_api_get_sleep_idle()));
+}
+
 static bool page_row_is_action(SettingsPage page, int row) {
   if (page == SETTINGS_PAGE_WIFI) {
-    return row >= 3 && row <= 6;
+    return row >= 2 && row <= 3;
+  }
+  if (page == SETTINGS_PAGE_WEATHER) {
+    return row >= 1;
   }
   if (page == SETTINGS_PAGE_MODEL) {
     return row == 3 || row == 4;
@@ -117,7 +151,10 @@ static bool page_row_is_action(SettingsPage page, int row) {
   if (page == SETTINGS_PAGE_STOCKS) {
     return row >= 1;
   }
-  if (page == SETTINGS_PAGE_DISPLAY && (row == 2 || row == 3 || row == 5)) {
+  if (page == SETTINGS_PAGE_SYSTEM && (row == 0 || row == 2 || row == 3)) {
+    return true;
+  }
+  if (page == SETTINGS_PAGE_SLEEP) {
     return true;
   }
   return false;
@@ -128,6 +165,9 @@ static bool page_row_is_category(SettingsPage page, int row) {
     return true;
   }
   if (page == SETTINGS_PAGE_MODEL && (row == 0 || row == 1)) {
+    return true;
+  }
+  if (page == SETTINGS_PAGE_SYSTEM && row == 1) {
     return true;
   }
   return false;
@@ -147,12 +187,15 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
           snprintf(out, outLen, "%s", app_tr(TR_MODEL));
           break;
         case 2:
-          snprintf(out, outLen, "%s", app_tr(TR_STOCK_TITLE));
+          snprintf(out, outLen, "%s", app_tr(TR_WEATHER_MENU));
           break;
         case 3:
-          snprintf(out, outLen, "%s", app_tr(TR_DISPLAY));
+          snprintf(out, outLen, "%s", app_tr(TR_STOCK_TITLE));
           break;
         case 4:
+          snprintf(out, outLen, "%s", app_tr(TR_SYSTEM));
+          break;
+        case 5:
           snprintf(out, outLen, "%s", app_tr(TR_ABOUT));
           break;
         default:
@@ -160,6 +203,7 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
           break;
       }
       break;
+
     case SETTINGS_PAGE_WIFI:
       switch (row) {
         case 0:
@@ -175,20 +219,9 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
           snprintf(out, outLen, "IP: %s", ipLine);
           break;
         case 2:
-          snprintf(out, outLen, "%s",
-                   settings_api_has_weather_api() ? app_tr(TR_WEATHER_API_OK)
-                                                  : app_tr(TR_WEATHER_API_MISSING));
-          break;
-        case 3:
-          snprintf(out, outLen, "%s", app_tr(TR_CONFIGURE_WEATHER_API));
-          break;
-        case 4:
-          snprintf(out, outLen, "%s", app_tr(TR_CLEAR_WEATHER_API));
-          break;
-        case 5:
           snprintf(out, outLen, "%s", app_tr(TR_RECONFIGURE_WIFI));
           break;
-        case 6:
+        case 3:
           snprintf(out, outLen, "%s", app_tr(TR_FORGET_WIFI));
           break;
         default:
@@ -196,6 +229,26 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
           break;
       }
       break;
+
+    case SETTINGS_PAGE_WEATHER:
+      switch (row) {
+        case 0:
+          snprintf(out, outLen, "%s",
+                   settings_api_has_weather_api() ? app_tr(TR_WEATHER_API_OK)
+                                                  : app_tr(TR_WEATHER_API_MISSING));
+          break;
+        case 1:
+          snprintf(out, outLen, "%s", app_tr(TR_CONFIGURE_WEATHER_API));
+          break;
+        case 2:
+          snprintf(out, outLen, "%s", app_tr(TR_CLEAR_WEATHER_API));
+          break;
+        default:
+          snprintf(out, outLen, "");
+          break;
+      }
+      break;
+
     case SETTINGS_PAGE_STOCKS:
       switch (row) {
         case 0:
@@ -214,6 +267,7 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
           break;
       }
       break;
+
     case SETTINGS_PAGE_MODEL:
       switch (row) {
         case 0:
@@ -239,6 +293,7 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
           break;
       }
       break;
+
     case SETTINGS_PAGE_MODEL_PROVIDER:
       if (row >= 0 && row < AI_PROVIDER_COUNT) {
         snprintf(out, outLen, "%s", ai_provider_name((AiProvider)row));
@@ -246,6 +301,7 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
         snprintf(out, outLen, "");
       }
       break;
+
     case SETTINGS_PAGE_MODEL_PRESET: {
       const AiProvider provider = settings_api_get_provider();
       if (row >= 0 && row < ai_provider_model_count(provider)) {
@@ -255,25 +311,20 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
       }
       break;
     }
-    case SETTINGS_PAGE_DISPLAY:
+
+    case SETTINGS_PAGE_SYSTEM:
       switch (row) {
         case 0:
-          snprintf(out, outLen, "%s", app_tr(TR_PANEL));
-          break;
-        case 1:
-          snprintf(out, outLen, "%s", app_tr(TR_REFRESH_AUTO));
-          break;
-        case 2:
           snprintf(out, outLen, "%s %s", app_tr(TR_LANGUAGE), language_value_label());
           break;
-        case 3:
+        case 1:
+          snprintf(out, outLen, "%s: %s", app_tr(TR_SLEEP), sleep_value_label());
+          break;
+        case 2:
           snprintf(out, outLen, "%s: %s", app_tr(TR_CLOCK_FORMAT),
                    settings_api_clock_use_24h() ? app_tr(TR_CLOCK_24H) : app_tr(TR_CLOCK_12H));
           break;
-        case 4:
-          snprintf(out, outLen, "%s: %s", app_tr(TR_CLOCK_THEME), app_tr(TR_CLOCK_THEME_LIGHT));
-          break;
-        case 5:
+        case 3:
           snprintf(out, outLen, "%s: %s", app_tr(TR_CLOCK_SHOW_DATE),
                    settings_api_clock_show_date() ? app_tr(TR_ON) : app_tr(TR_OFF));
           break;
@@ -282,6 +333,20 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
           break;
       }
       break;
+
+    case SETTINGS_PAGE_SLEEP:
+      if (row >= 0 && row < (int)SLEEP_IDLE_COUNT) {
+        const SleepIdleOption option = (SleepIdleOption)row;
+        if (option == settings_api_get_sleep_idle()) {
+          snprintf(out, outLen, "* %s", app_tr(sleep_option_tr(option)));
+        } else {
+          snprintf(out, outLen, "%s", app_tr(sleep_option_tr(option)));
+        }
+      } else {
+        snprintf(out, outLen, "");
+      }
+      break;
+
     case SETTINGS_PAGE_ABOUT:
       if (row == 0) {
         snprintf(out, outLen, "Aink");
@@ -289,6 +354,7 @@ static void build_row_text(SettingsPage page, int row, char *out, size_t outLen)
         snprintf(out, outLen, "%s", app_tr(TR_VERSION));
       }
       break;
+
     default:
       snprintf(out, outLen, "");
       break;
@@ -300,6 +366,8 @@ static void sync_focus_for_page(SettingsPage page) {
     s_focusRow = (int)settings_api_get_provider();
   } else if (page == SETTINGS_PAGE_MODEL_PRESET) {
     s_focusRow = settings_api_get_model_index();
+  } else if (page == SETTINGS_PAGE_SLEEP) {
+    s_focusRow = (int)settings_api_get_sleep_idle();
   } else {
     s_focusRow = 0;
   }
@@ -432,12 +500,15 @@ SettingsActivateResult ui_settings_activate(void) {
         enter_page(SETTINGS_PAGE_MODEL);
         break;
       case 2:
-        enter_page(SETTINGS_PAGE_STOCKS);
+        enter_page(SETTINGS_PAGE_WEATHER);
         break;
       case 3:
-        enter_page(SETTINGS_PAGE_DISPLAY);
+        enter_page(SETTINGS_PAGE_STOCKS);
         break;
       case 4:
+        enter_page(SETTINGS_PAGE_SYSTEM);
+        break;
+      case 5:
         enter_page(SETTINGS_PAGE_ABOUT);
         break;
       default:
@@ -490,23 +561,37 @@ SettingsActivateResult ui_settings_activate(void) {
     return SETTINGS_ACT_NONE;
   }
 
-  if (s_page == SETTINGS_PAGE_DISPLAY) {
-    if (s_focusRow == 2) {
+  if (s_page == SETTINGS_PAGE_SYSTEM) {
+    if (s_focusRow == 0) {
       app_locale_toggle();
       return SETTINGS_ACT_LOCALE;
     }
-    if (s_focusRow == 3) {
+    if (s_focusRow == 1) {
+      enter_page(SETTINGS_PAGE_SLEEP);
+      update_menu_view();
+      return SETTINGS_ACT_NONE;
+    }
+    if (s_focusRow == 2) {
       settings_api_set_clock_use_24h(!settings_api_clock_use_24h());
       ui_clock_on_settings_changed();
       update_menu_view();
       return SETTINGS_ACT_NONE;
     }
-    if (s_focusRow == 5) {
+    if (s_focusRow == 3) {
       settings_api_set_clock_show_date(!settings_api_clock_show_date());
       ui_clock_on_settings_changed();
       update_menu_view();
       return SETTINGS_ACT_NONE;
     }
+  }
+
+  if (s_page == SETTINGS_PAGE_SLEEP) {
+    if (s_focusRow >= 0 && s_focusRow < (int)SLEEP_IDLE_COUNT) {
+      settings_api_set_sleep_idle((SleepIdleOption)s_focusRow);
+      enter_page(SETTINGS_PAGE_SYSTEM);
+      update_menu_view();
+    }
+    return SETTINGS_ACT_NONE;
   }
 
   if (!page_row_is_action(s_page, s_focusRow)) {
@@ -527,12 +612,12 @@ SettingsActivateResult ui_settings_activate(void) {
     }
   }
 
-  if (s_page == SETTINGS_PAGE_WIFI) {
-    if (s_focusRow == 3) {
+  if (s_page == SETTINGS_PAGE_WEATHER) {
+    if (s_focusRow == 1) {
       settings_api_request_portal_restart();
       return SETTINGS_ACT_RESTART;
     }
-    if (s_focusRow == 4) {
+    if (s_focusRow == 2) {
       if (settings_api_has_weather_api()) {
         settings_api_clear_weather_api();
         weather_service_reset();
@@ -540,11 +625,14 @@ SettingsActivateResult ui_settings_activate(void) {
       }
       return SETTINGS_ACT_NONE;
     }
-    if (s_focusRow == 5) {
+  }
+
+  if (s_page == SETTINGS_PAGE_WIFI) {
+    if (s_focusRow == 2) {
       settings_api_request_portal_restart();
       return SETTINGS_ACT_RESTART;
     }
-    if (s_focusRow == 6) {
+    if (s_focusRow == 3) {
       settings_api_forget_wifi_and_restart();
       return SETTINGS_ACT_RESTART;
     }

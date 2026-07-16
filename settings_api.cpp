@@ -26,6 +26,7 @@
 #define PREFS_WATCHLIST_DEFAULT     "sh600519,AAPL"
 #define PREFS_KEY_CLOCK_24H         "clk_24h"
 #define PREFS_KEY_CLOCK_DATE        "clk_date"
+#define PREFS_KEY_SLEEP_IDLE        "sleep_idle"
 
 static void clamp_model_index_for_provider(AiProvider provider, int *modelIndex) {
   const int count = ai_provider_model_count(provider);
@@ -386,6 +387,41 @@ void settings_api_set_clock_show_date(bool showDate) {
   prefs.begin(PREFS_NAMESPACE, false);
   prefs.putBool(PREFS_KEY_CLOCK_DATE, showDate);
   prefs.end();
+}
+
+SleepIdleOption settings_api_get_sleep_idle(void) {
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, true);
+  const uint8_t stored = prefs.getUChar(PREFS_KEY_SLEEP_IDLE, (uint8_t)SLEEP_IDLE_10M);
+  prefs.end();
+  if (stored >= (uint8_t)SLEEP_IDLE_COUNT) {
+    return SLEEP_IDLE_10M;
+  }
+  return (SleepIdleOption)stored;
+}
+
+void settings_api_set_sleep_idle(SleepIdleOption option) {
+  if ((unsigned)option >= SLEEP_IDLE_COUNT) {
+    return;
+  }
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, false);
+  prefs.putUChar(PREFS_KEY_SLEEP_IDLE, (uint8_t)option);
+  prefs.end();
+}
+
+unsigned long settings_api_sleep_idle_ms(void) {
+  switch (settings_api_get_sleep_idle()) {
+    case SLEEP_IDLE_5M:
+      return 5UL * 60UL * 1000UL;
+    case SLEEP_IDLE_10M:
+      return 10UL * 60UL * 1000UL;
+    case SLEEP_IDLE_30M:
+      return 30UL * 60UL * 1000UL;
+    case SLEEP_IDLE_NEVER:
+    default:
+      return 0UL;
+  }
 }
 
 bool settings_api_consume_force_portal_boot(void) {

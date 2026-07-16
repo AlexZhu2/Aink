@@ -15,17 +15,18 @@ extern "C" {
 #include "qrcode.h"
 }
 
-#define RSS_TEXT_W        118
-#define RSS_BODY_H         88
-#define RSS_HEADER_Y          4
-#define RSS_BODY_Y           26
-#define RSS_QR_PX              56
-#define RSS_QR_X              136
-#define RSS_QR_Y               26
+/* Layout B: source + index on top, title-first, QR bottom-right. */
+#define RSS_HEADER_Y             4
+#define RSS_TITLE_X              8
+#define RSS_TITLE_Y             22
+#define RSS_TITLE_W            184
+#define RSS_TITLE_H             90
+#define RSS_QR_PX               90
+#define RSS_QR_X               104
+#define RSS_QR_Y               104
 #define RSS_QR_VERSION           7
 #define RSS_QR_MAX_URL_BYTES   154
-#define RSS_HINT_Y            186
-#define RSS_QR_BUFFER_SIZE    350
+#define RSS_QR_BUFFER_SIZE     350
 #define RSS_AUTO_ADVANCE_MS   30000UL
 
 static_assert(RSS_LINK_LEN - 1 <= RSS_QR_MAX_URL_BYTES,
@@ -36,8 +37,6 @@ static lv_obj_t *s_sourceLabel = nullptr;
 static lv_obj_t *s_indexLabel = nullptr;
 static lv_obj_t *s_bodyLabel = nullptr;
 static lv_obj_t *s_qrCanvas = nullptr;
-static lv_obj_t *s_qrCaptionLabel = nullptr;
-static lv_obj_t *s_hintLabel = nullptr;
 static lv_color_t *s_qrCanvasBuf = nullptr;
 static int s_currentIndex = 0;
 static unsigned long s_lastAutoAdvanceMs = 0;
@@ -146,9 +145,6 @@ static void render_current(void) {
     if (s_qrCanvas != nullptr) {
       lv_obj_add_flag(s_qrCanvas, LV_OBJ_FLAG_HIDDEN);
     }
-    if (s_qrCaptionLabel != nullptr) {
-      lv_obj_add_flag(s_qrCaptionLabel, LV_OBJ_FLAG_HIDDEN);
-    }
     return;
   }
 
@@ -157,9 +153,6 @@ static void render_current(void) {
     lv_label_set_text(s_bodyLabel, app_tr(TR_RSS_NO_DATA));
     if (s_qrCanvas != nullptr) {
       lv_obj_add_flag(s_qrCanvas, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (s_qrCaptionLabel != nullptr) {
-      lv_obj_add_flag(s_qrCaptionLabel, LV_OBJ_FLAG_HIDDEN);
     }
     return;
   }
@@ -184,10 +177,8 @@ static void render_current(void) {
   lv_obj_invalidate(s_qrCanvas);
   if (hasQr) {
     lv_obj_clear_flag(s_qrCanvas, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_qrCaptionLabel, LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_obj_add_flag(s_qrCanvas, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_qrCaptionLabel, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -218,43 +209,27 @@ void ui_rss_init(void) {
 
   s_indexLabel = lv_label_create(s_screenRss);
   style_label(s_indexLabel);
-  lv_obj_set_width(s_indexLabel, 48);
+  lv_obj_set_width(s_indexLabel, 56);
   lv_obj_set_style_text_align(s_indexLabel, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-  lv_obj_set_pos(s_indexLabel, 200 - 56, RSS_HEADER_Y);
+  lv_obj_set_pos(s_indexLabel, 200 - 64, RSS_HEADER_Y);
 
   s_bodyLabel = lv_label_create(s_screenRss);
   style_label(s_bodyLabel);
-  lv_obj_set_width(s_bodyLabel, RSS_TEXT_W);
-  lv_obj_set_height(s_bodyLabel, RSS_BODY_H);
+  lv_obj_set_width(s_bodyLabel, RSS_TITLE_W);
+  lv_obj_set_height(s_bodyLabel, RSS_TITLE_H);
   lv_label_set_long_mode(s_bodyLabel, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(s_bodyLabel, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
-  lv_obj_set_pos(s_bodyLabel, 8, RSS_BODY_Y);
+  lv_obj_set_pos(s_bodyLabel, RSS_TITLE_X, RSS_TITLE_Y);
   lv_label_set_text(s_bodyLabel, app_tr(TR_RSS_NO_DATA));
 
   if (ensure_qr_canvas_buffer()) {
     s_qrCanvas = lv_canvas_create(s_screenRss);
     lv_canvas_set_buffer(s_qrCanvas, s_qrCanvasBuf, RSS_QR_PX, RSS_QR_PX, LV_IMG_CF_TRUE_COLOR);
     lv_obj_set_pos(s_qrCanvas, RSS_QR_X, RSS_QR_Y);
-    lv_obj_set_style_border_width(s_qrCanvas, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(s_qrCanvas, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_qrCanvas, 0, LV_PART_MAIN);
     lv_obj_add_flag(s_qrCanvas, LV_OBJ_FLAG_HIDDEN);
     qr_canvas_clear();
   }
-
-  s_qrCaptionLabel = lv_label_create(s_screenRss);
-  style_label(s_qrCaptionLabel);
-  lv_obj_set_width(s_qrCaptionLabel, RSS_QR_PX + 8);
-  lv_obj_set_style_text_align(s_qrCaptionLabel, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_set_pos(s_qrCaptionLabel, RSS_QR_X - 4, RSS_QR_Y + RSS_QR_PX + 2);
-  lv_label_set_text(s_qrCaptionLabel, app_tr(TR_RSS_SCAN));
-  lv_obj_add_flag(s_qrCaptionLabel, LV_OBJ_FLAG_HIDDEN);
-
-  s_hintLabel = lv_label_create(s_screenRss);
-  style_label(s_hintLabel);
-  lv_obj_set_width(s_hintLabel, 200);
-  lv_obj_set_style_text_align(s_hintLabel, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_set_pos(s_hintLabel, 0, RSS_HINT_Y);
-  lv_label_set_text(s_hintLabel, app_tr(TR_RSS_HINT));
 
   s_currentIndex = 0;
 }
@@ -280,12 +255,6 @@ void ui_rss_refresh(void) {
 }
 
 void ui_rss_refresh_locale(void) {
-  if (s_qrCaptionLabel != nullptr) {
-    lv_label_set_text(s_qrCaptionLabel, app_tr(TR_RSS_SCAN));
-  }
-  if (s_hintLabel != nullptr) {
-    lv_label_set_text(s_hintLabel, app_tr(TR_RSS_HINT));
-  }
   ui_rss_refresh();
 }
 

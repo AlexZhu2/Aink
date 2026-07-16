@@ -10,6 +10,7 @@
 #define BTN_DEBOUNCE_MS   25U
 #define BTN_DOUBLE_MS     400U
 #define BTN_LONG_MS       700U
+#define BTN_COMBO_MS      200U
 #define BTN_EDGE_QUEUE_SIZE    32U
 #define BTN_ACTION_QUEUE_SIZE  16U
 #define KEY_INDICATOR_FLASH_MS 40U
@@ -38,6 +39,9 @@ static volatile uint8_t s_edgeTail = 0;
 static BtnAction s_actionQueue[BTN_ACTION_QUEUE_SIZE];
 static uint8_t s_actionHead = 0;
 static uint8_t s_actionTail = 0;
+static bool s_comboArmed = false;
+static bool s_comboFired = false;
+static uint32_t s_comboStartMs = 0;
 #if KEY_INDICATOR_LED_PIN >= 0
 static bool s_indicatorActive = false;
 static uint32_t s_indicatorOnAtMs = 0;
@@ -46,7 +50,8 @@ static uint32_t s_indicatorOnAtMs = 0;
 static void print_serial_help(void) {
   Serial.println("[BtnSim] Serial keys (115200, line ending Any):");
   Serial.println("  n = A click (next)   p = A double (prev)   b = A long (back)");
-  Serial.println("  c = B click (confirm)   v = B double (voice)   h = this help");
+  Serial.println("  c = B click (confirm)   v = B double (voice)");
+  Serial.println("  s = A+B combo (modem sleep)   h = this help");
 }
 
 static uint32_t btn_now_ms(void) {
@@ -215,9 +220,31 @@ static void serviceButton(ButtonTracker *btn, BtnId id, uint32_t now) {
   }
 }
 
+static void serviceCombo(uint32_t now) {
+  if (s_btnA.stableDown && s_btnB.stableDown) {
+    if (!s_comboArmed) {
+      s_comboArmed = true;
+      s_comboFired = false;
+      s_comboStartMs = now;
+    } else if (!s_comboFired && elapsedMs(now, s_comboStartMs, BTN_COMBO_MS)) {
+      s_comboFired = true;
+      s_btnA.clickCount = 0;
+      s_btnB.clickCount = 0;
+      s_btnA.longFired = true;
+      s_btnB.longFired = true;
+      queueAction(BTN_ACTION_MODEM_SLEEP);
+    }
+    return;
+  }
+
+  s_comboArmed = false;
+  s_comboFired = false;
+}
+
 static void serviceButtons(uint32_t now) {
   serviceButton(&s_btnA, BTN_ID_A, now);
   serviceButton(&s_btnB, BTN_ID_B, now);
+  serviceCombo(now);
 }
 
 static ButtonTracker *trackerFor(BtnId id) {
@@ -288,6 +315,9 @@ static BtnAction action_from_serial_char(char ch) {
     case 'v':
     case 'V':
       return BTN_ACTION_VOICE_TOGGLE;
+    case 's':
+    case 'S':
+      return BTN_ACTION_MODEM_SLEEP;
     default:
       return BTN_ACTION_NONE;
   }
